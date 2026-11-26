@@ -26,6 +26,9 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ### 新增
 
+- `starry-client-config`：直接从服务器密钥材料生成客户端配置（ID 服务器、
+  中继服务器、公钥、策略组标注），输出 text、JSON 或 base64 导入字符串。只读
+  `id_ed25519.pub`；绝不签发 token。
 - 策略引擎 v1：版本化的设备组策略文档（`STARRY_STRATEGY_FILE`），按组覆盖
   连接 JWT 的 scope 要求并支持整组拒绝，在 HBBS 内任何信令工作之前强制执行，
   审计事件附带组名。支持运行时经本地控制重载

@@ -31,6 +31,10 @@ the official RustDesk Server version with the Starry patch version, for example
 
 ### Added
 
+- `starry-client-config`: generates the client-side configuration (ID server,
+  relay server, public key, strategy group annotation) straight from the
+  server's key material as text, JSON, or a base64 import string. Reads only
+  `id_ed25519.pub`; never mints tokens.
 - Strategy engine v1: a versioned device-group policy document
   (`STARRY_STRATEGY_FILE`) with per-group connection JWT scope overrides and
   group deny verdicts, enforced inside HBBS before any signalling work and
