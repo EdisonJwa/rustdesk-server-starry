@@ -115,6 +115,7 @@ def copy_overlay(repo_root: Path, upstream: Path) -> None:
         "profile_activation.rs",
         "pairing.rs",
         "relay_enrollment.rs",
+        "ops_surface.rs",
         "relay_observer.rs",
         "relay_quality.rs",
         "secure_tcp.rs",
@@ -1198,6 +1199,7 @@ const BANDWIDTH_EMA_ALPHA_BASIS_POINTS: u32 = 2_500;
         bail!("Relay enrollment preflight failed: {error}");
     }
     crate::fast_media_relay::spawn(&key);
+    crate::ops_surface::spawn();
 ''',
         )
     else:
@@ -1217,6 +1219,7 @@ const BANDWIDTH_EMA_ALPHA_BASIS_POINTS: u32 = 2_500;
         bail!("Relay enrollment preflight failed: {error}");
     }
     crate::fast_media_relay::spawn(&key);
+    crate::ops_surface::spawn();
 ''',
         )
 
@@ -1581,6 +1584,48 @@ fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(1))
     });
+}
+
+/// One consistent view of the counters the operator surface exposes.
+///
+/// HBBR keeps detailed state behind authenticated telemetry; this aggregate
+/// exists so the loopback operations listener can report the same numbers
+/// without widening the visibility of each individual counter.
+pub(crate) struct OpsSnapshot {
+    pub(crate) version: String,
+    pub(crate) uptime_seconds: u64,
+    pub(crate) active_sessions: u64,
+    pub(crate) capacity_sessions: u64,
+    pub(crate) active_bandwidth_bps: u64,
+    pub(crate) capacity_bandwidth_bps: u64,
+    pub(crate) load_basis_points: u64,
+    pub(crate) pending_pairs: u64,
+    pub(crate) admission_rejections: u64,
+    pub(crate) probes_successful: u64,
+    pub(crate) probes_rate_limited: u64,
+    pub(crate) probes_unsupported: u64,
+    pub(crate) probes_malformed: u64,
+    pub(crate) telemetry_auth_failures: u64,
+}
+
+pub(crate) fn ops_snapshot() -> OpsSnapshot {
+    let load = current_relay_load();
+    OpsSnapshot {
+        version: starry_version(),
+        uptime_seconds: PROCESS_STARTED.elapsed().as_secs(),
+        active_sessions: u64::from(load.active_sessions),
+        capacity_sessions: u64::from(load.capacity_sessions),
+        active_bandwidth_bps: load.bandwidth_bps,
+        capacity_bandwidth_bps: load.capacity_bandwidth_bps,
+        load_basis_points: u64::from(load.load_basis_points),
+        pending_pairs: PENDING_RELAY_PAIRS.load(Ordering::Relaxed) as u64,
+        admission_rejections: ADMISSION_REJECTIONS.load(Ordering::Relaxed),
+        probes_successful: PROBE_SUCCESSFUL.load(Ordering::Relaxed),
+        probes_rate_limited: PROBE_RATE_LIMITED.load(Ordering::Relaxed),
+        probes_unsupported: PROBE_UNSUPPORTED.load(Ordering::Relaxed),
+        probes_malformed: PROBE_MALFORMED.load(Ordering::Relaxed),
+        telemetry_auth_failures: TELEMETRY_AUTH_FAILURES.load(Ordering::Relaxed),
+    }
 }
 
 fn atomic_saturating_sub(value: &AtomicUsize, amount: usize) {
@@ -2414,6 +2459,15 @@ def patch_modules(upstream: Path) -> None:
             hbbr,
             "mod relay_server;\n",
             "mod relay_enrollment;\nmod relay_server;\n",
+        )
+    # The operations surface belongs to the hbbr binary: relay_server is a
+    # module of that binary, not of the hbbs library.
+    hbbr_text = hbbr.read_text(encoding="utf-8")
+    if "mod ops_surface;" not in hbbr_text:
+        replace_once(
+            hbbr,
+            "mod relay_server;\n",
+            "mod ops_surface;\nmod relay_server;\n",
         )
 
 

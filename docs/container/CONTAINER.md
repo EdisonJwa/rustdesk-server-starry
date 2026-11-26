@@ -206,6 +206,29 @@ Set `RELAY_MAX_SESSIONS` (passed to HBBR as
 enabling Relay quality. HBBR combines that ratio with its current aggregate
 bandwidth ratio; `TOTAL_BANDWIDTH` remains expressed in Mbit/s.
 
+### HBBR operations endpoint
+
+HBBR can expose a read-only supervision surface for systemd probes, load
+balancers, and Prometheus scrapes. It is off unless an address is named:
+
+```sh
+docker run ... -e STARRY_RELAY_OPS_LISTEN=127.0.0.1:21120 ... hbbr
+```
+
+- `/healthz` returns JSON liveness with the artifact version, uptime, and the
+  admission-rejection count.
+- `/metrics` returns Prometheus text format: active and capacity sessions,
+  active and capacity bandwidth, load basis points, pending pairs, uptime, and
+  counters for admission rejections, probe outcomes, and telemetry
+  authentication failures. These are the same numbers authenticated telemetry
+  reports.
+
+The listener refuses a non-loopback address unless
+`STARRY_RELAY_OPS_ALLOW_PUBLIC=1` is set explicitly, because the payload
+describes relay capacity and admission pressure. Keep it on loopback and let a
+sidecar or a reverse proxy with its own access control scrape it. It answers
+`GET` and `HEAD` only, and responses are never cached.
+
 ## Run a single command without Compose
 
 Compose is recommended for long-lived services. For inspection or temporary

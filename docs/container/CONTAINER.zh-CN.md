@@ -184,6 +184,24 @@ docker restart rustdesk-starry-hbbs
 `STARRY_RELAY_MAX_SESSIONS`）设为真实并发会话容量。HBBR 会将该使用率与当前汇总带宽
 使用率取较高值；`TOTAL_BANDWIDTH` 仍以 Mbit/s 表示。
 
+### HBBR 运维端点
+
+HBBR 可以提供只读的监督接口，供 systemd 探针、负载均衡器与 Prometheus 抓取。
+只有显式指定地址时才会开启：
+
+```sh
+docker run ... -e STARRY_RELAY_OPS_LISTEN=127.0.0.1:21120 ... hbbr
+```
+
+- `/healthz` 返回 JSON 存活信息，包含产物版本、运行时长与准入拒绝计数。
+- `/metrics` 返回 Prometheus 文本格式：活跃与容量会话数、活跃与容量带宽、
+  负载基点、待配对数量、运行时长，以及准入拒绝、探测结果与遥测认证失败计数。
+  这些数字与认证遥测报告的一致。
+
+除非显式设置 `STARRY_RELAY_OPS_ALLOW_PUBLIC=1`，该监听器会拒绝非回环地址，
+因为负载内容描述了中继容量与准入压力。请保持在回环上，由 sidecar 或自带访问
+控制的反向代理去抓取。它只响应 `GET` 与 `HEAD`，且响应永不被缓存。
+
 ## 不使用 Compose 执行命令
 
 长期服务推荐 Compose。临时检查可执行：
