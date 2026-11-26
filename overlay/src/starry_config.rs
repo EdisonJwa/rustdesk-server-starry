@@ -1706,6 +1706,12 @@ fn validate_secure_tcp(config: &SecureTcpConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Treats Unix-style roots as absolute on every platform so a configuration
+/// shared with Linux hosts keeps one meaning when it is inspected on Windows.
+fn is_portable_absolute(path: &str) -> bool {
+    Path::new(path).is_absolute() || path.starts_with('/')
+}
+
 fn validate_websocket_signal(
     config: &mut WebSocketSignalConfig,
     relay_servers: &[String],
@@ -1860,7 +1866,7 @@ fn validate_websocket_signal(
             ));
         }
         match (&endpoint.telemetry_secret_file, telemetry_endpoint) {
-            (Some(path), true) if std::path::Path::new(path).is_absolute() => {}
+            (Some(path), true) if is_portable_absolute(path) => {}
             (Some(_), true) => {
                 return Err(format!(
                     "websocket_signal.relay_health endpoint '{}' telemetry_secret_file must be an absolute path",
@@ -1946,7 +1952,7 @@ fn validate_mmdb(config: &mut MmdbConfig) -> Result<(), String> {
         }
         let path = Path::new(&database.path);
         let mut components = path.components();
-        if path.is_absolute()
+        if is_portable_absolute(&database.path)
             || !matches!(components.next(), Some(Component::Normal(root)) if root == "mmdb")
             || components.any(|component| !matches!(component, Component::Normal(_)))
             || path.extension().and_then(|value| value.to_str()) != Some("mmdb")
@@ -2211,6 +2217,29 @@ websocket_signal:
         );
         let err = parse_config(&public_with_secret).unwrap_err();
         assert!(err.contains("only with /ws/telemetry"));
+    }
+
+    #[test]
+    fn unix_style_secret_paths_are_absolute_on_every_platform() {
+        let raw = r#"
+version: 4
+relay_servers: [relay-a.example.com:21117]
+websocket_signal:
+  relay_health:
+    endpoints:
+      - relay: relay-a.example.com:21117
+        url: wss://relay-a.example.com/ws/telemetry
+        telemetry_secret_file: /run/secrets/relay
+"#;
+        let config = parse_config(raw).unwrap();
+        assert_eq!(
+            config.websocket_signal.relay_health.endpoints[0]
+                .telemetry_secret_file
+                .as_deref(),
+            Some("/run/secrets/relay")
+        );
+        assert!(is_portable_absolute("/run/secrets/relay"));
+        assert!(!is_portable_absolute("secrets/relay"));
     }
 
     #[test]

@@ -1116,9 +1116,15 @@ fn remove_relay_credentials(
             Err(_) => return Err(EnrollmentError::internal()),
         }
     }
-    File::open(directory)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| EnrollmentError::internal())
+    // Windows cannot fsync a directory handle; the removed entries are already
+    // gone from the NTFS journal once the handles close.
+    #[cfg(unix)]
+    {
+        File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| EnrollmentError::internal())?;
+    }
+    Ok(())
 }
 
 fn read_record(path: &Path) -> Result<EnrollmentRecord, EnrollmentError> {
@@ -1352,9 +1358,15 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32, replace: bool) -> Result<(
             }
         }
     }
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| "cannot sync state directory".to_owned())
+    // Windows cannot fsync a directory handle; the file itself is already
+    // durable and NTFS journals the rename.
+    #[cfg(unix)]
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "cannot sync state directory".to_owned())?;
+    }
+    Ok(())
 }
 
 fn digest(value: &[u8]) -> String {

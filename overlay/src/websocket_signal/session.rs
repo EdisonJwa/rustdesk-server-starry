@@ -51,8 +51,10 @@ impl WsWriteTransport {
         self.try_send(OutboundFrame::Binary(bytes))
     }
 
-    pub(crate) fn send_pong(&self, bytes: Vec<u8>) -> Result<(), SendError> {
-        self.try_send(OutboundFrame::Pong(bytes))
+    // WebSocket ping payloads arrive as Vec<u8> on tungstenite 0.28 and
+    // Bytes on the 0.29 fork; both convert into the stored Vec form.
+    pub(crate) fn send_pong(&self, bytes: impl Into<Vec<u8>>) -> Result<(), SendError> {
+        self.try_send(OutboundFrame::Pong(bytes.into()))
     }
 
     fn try_send(&self, frame: OutboundFrame) -> Result<(), SendError> {

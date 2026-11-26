@@ -1,7 +1,7 @@
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -292,9 +292,15 @@ fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), String> {
         });
     }
     fs::remove_file(&temporary).map_err(|_| "downgrade_output_cleanup_failed".to_owned())?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| "downgrade_output_sync_failed".to_owned())
+    // Windows cannot fsync a directory handle; the file itself is already
+    // durable and NTFS journals the hard-link publication.
+    #[cfg(unix)]
+    {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "downgrade_output_sync_failed".to_owned())?;
+    }
+    Ok(())
 }
 
 fn unix_seconds() -> u64 {

@@ -168,11 +168,7 @@ def patch_dependencies(upstream: Path) -> None:
         accepted: tuple[str, ...],
         insert_after: str | None = None,
     ) -> None:
-        content = cargo.read_text(encoding="utf-8")
-        matches = re.findall(
-            rf"(?m)^{re.escape(name)}\s*=.*$",
-            content,
-        )
+        matches = dependency_matches(name)
         if matches == [desired]:
             return
         if len(matches) == 1 and matches[0] in accepted:
@@ -185,6 +181,35 @@ def patch_dependencies(upstream: Path) -> None:
                 insert_after + "\n" + desired + "\n",
             )
             return
+        raise RuntimeError(
+            f"unexpected {name} dependency declaration(s) in {cargo}: {matches}"
+        )
+
+    def dependency_matches(name: str) -> list[str]:
+        """Collect dependency declarations outside [patch.*] sections."""
+        content = cargo.read_text(encoding="utf-8")
+        patch_at = content.find("\n[patch.")
+        scope = content if patch_at < 0 else content[:patch_at]
+        return re.findall(rf"(?m)^{re.escape(name)}\s*=.*$", scope)
+
+    def set_dependency_policies(
+        name: str,
+        policies: tuple[tuple[str, tuple[str, ...]], ...],
+    ) -> None:
+        """Apply the first policy that matches the current declaration.
+
+        Each policy is ``(desired, accepted)``. This supports upstream bases
+        that declare the same dependency in structurally different forms,
+        such as the crates.io pin used before the WebSocket hardening and the
+        rustdesk-org git fork introduced with the message-size bounds.
+        """
+        matches = dependency_matches(name)
+        for desired, accepted in policies:
+            if matches == [desired]:
+                return
+            if len(matches) == 1 and matches[0] in accepted:
+                replace_once(cargo, matches[0] + "\n", desired + "\n")
+                return
         raise RuntimeError(
             f"unexpected {name} dependency declaration(s) in {cargo}: {matches}"
         )
@@ -245,19 +270,62 @@ def patch_dependencies(upstream: Path) -> None:
         'jsonwebtoken = { version = "9.3.1", default-features = false }',
         accepted=('jsonwebtoken = "8"', 'jsonwebtoken = "9.3.1"'),
     )
-    set_dependency(
+    # Upstream tracks its WebSocket hardening through the rustdesk-org
+    # forks: post-handshake set_config, early frame-size enforcement for
+    # attacker-declared frame lengths, and Sec-WebSocket-Key validation.
+    # Every Starry base adopts the fork so the WebSocket layers (native
+    # HBBS /ws/id, WSS-to-WSS Relay, and authenticated WSS health probes)
+    # share one transport with the same bounds on every release.
+    tokio_tungstenite_fork = (
+        'tokio-tungstenite = { git = '
+        '"https://github.com/rustdesk-org/tokio-tungstenite", '
+        'rev = "c241b11b03de4881faf1ecd2fe6e867c92f3013b", version = "0.29" }'
+    )
+    tokio_tungstenite_fork_desired = (
+        'tokio-tungstenite = { git = '
+        '"https://github.com/rustdesk-org/tokio-tungstenite", '
+        'rev = "c241b11b03de4881faf1ecd2fe6e867c92f3013b", version = "0.29", '
+        'features = ["rustls-tls-native-roots"] }'
+    )
+    set_dependency_policies(
         "tokio-tungstenite",
-        'tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }',
-        accepted=(
-            'tokio-tungstenite = "0.17"',
-            'tokio-tungstenite = { version = "0.17", features = ["rustls-tls-native-roots"] }',
+        (
+            (
+                tokio_tungstenite_fork_desired,
+                (
+                    tokio_tungstenite_fork,
+                    'tokio-tungstenite = "0.17"',
+                    'tokio-tungstenite = { version = "0.17", '
+                    'features = ["rustls-tls-native-roots"] }',
+                    'tokio-tungstenite = { version = "0.28", '
+                    'features = ["rustls-tls-native-roots"] }',
+                ),
+            ),
         ),
     )
-    set_dependency(
+    set_dependency_policies(
         "tungstenite",
-        'tungstenite = "0.28"',
-        accepted=('tungstenite = "0.17"',),
+        (
+            (
+                'tungstenite = "0.29"',
+                (
+                    'tungstenite = "0.17"',
+                    'tungstenite = "0.28"',
+                ),
+            ),
+        ),
     )
+    # The forked tungstenite must be wired through the workspace patch
+    # table; bases without one (pre-hardening releases) gain it.
+    content = cargo.read_text(encoding="utf-8")
+    if "[patch.crates-io]" not in content:
+        content = content.rstrip("\n") + (
+            "\n\n[patch.crates-io]\n"
+            "tungstenite = { git = "
+            '"https://github.com/rustdesk-org/tungstenite-rs", '
+            'rev = "efce47e5364f00a63302cf07ab1fb13ded478914" }\n'
+        )
+        cargo.write_text(content, encoding="utf-8")
     set_dependency(
         "http",
         'http = "1.5"',
@@ -437,11 +505,17 @@ def patch_dependencies(upstream: Path) -> None:
         source = next((block for block in legacy_dev if block in content), None)
         if source is not None:
             replace_once(cargo, source, final_dev)
-        elif "[dev-dependencies]" not in content:
+        elif "[dev-dependencies]" not in content and "[build-dependencies]\n" in content:
             replace_once(
                 cargo,
                 "[build-dependencies]\n",
                 final_dev + "[build-dependencies]\n",
+            )
+        elif "[dev-dependencies]" not in content and "[patch.crates-io]\n" in content:
+            replace_once(
+                cargo,
+                "[patch.crates-io]\n",
+                final_dev + "[patch.crates-io]\n",
             )
         elif 'rcgen = "0.9"\n' in content:
             replace_once(
@@ -501,14 +575,25 @@ def patch_common(upstream: Path) -> None:
         )
     content = common.read_text(encoding="utf-8")
     if "for (name, takes_value) in arguments" not in content:
-        replace_once(
-            common,
-            '''    for (k, v) in matches.args {
+        # Bases before the bind-interface refactor routed parsed arguments
+        # through std::env::set_var directly; newer bases call set_arg().
+        # Either way the Starry flag-to-env mapping replaces the loop.
+        legacy_loop = '''    for (k, v) in matches.args {
         if let Some(v) = v.vals.first() {
             std::env::set_var(arg_name(k), v.to_string_lossy().to_string());
         }
     }
-''',
+'''
+        set_arg_loop = '''    for (k, v) in matches.args {
+        if let Some(v) = v.vals.first() {
+            set_arg(k, &v.to_string_lossy());
+        }
+    }
+'''
+        anchor = legacy_loop if legacy_loop in content else set_arg_loop
+        replace_once(
+            common,
+            anchor,
             '''    for (name, takes_value) in arguments {
         if takes_value {
             if let Some(value) = matches.value_of(&name) {
@@ -546,11 +631,13 @@ def patch_relay(upstream: Path) -> None:
             "        let callback = |req: &Request, response: Response| {\n",
             "        let callback = |req: &Request, mut response: Response| {\n",
         )
+        # Anchor only on the callback tail: the accept call after it changed
+        # shape when upstream bounded the handshake (accept_hdr_async_with_config
+        # plus timeout), but the callback tail is identical on both bases.
         replace_once(
             relay,
             "            Ok(response)\n"
-            "        };\n"
-            "        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;\n",
+            "        };\n",
             "            let version = format!(\n"
             "                \"{}-patch-v{}\",\n"
             "                env!(\"CARGO_PKG_VERSION\"),\n"
@@ -562,8 +649,7 @@ def patch_relay(upstream: Path) -> None:
             "                response.headers_mut().insert(\"x-starry-version\", value);\n"
             "            }\n"
             "            Ok(response)\n"
-            "        };\n"
-            "        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;\n",
+            "        };\n",
         )
 
 
@@ -593,13 +679,23 @@ def patch_relay_quality_hbbr(upstream: Path) -> None:
 
     content = relay.read_text(encoding="utf-8")
     if '"STARRY_RELAY_MAX_SESSIONS"' not in content:
+        # check_params moved from std::env::var to common::get_arg() when the
+        # bind-interface refactor landed; keep the injection on both shapes.
+        single_bandwidth_legacy = (
+            "    let tmp = std::env::var(\"SINGLE_BANDWIDTH\")\n"
+        )
+        single_bandwidth_read = (
+            single_bandwidth_legacy
+            if single_bandwidth_legacy in content
+            else "    let tmp = crate::common::get_arg(\"SINGLE_BANDWIDTH\")\n"
+        )
         replace_once(
             relay,
             "    log::info!(\n"
             "        \"TOTAL_BANDWIDTH: {}Mb/s\",\n"
             "        TOTAL_BANDWIDTH.load(Ordering::SeqCst) as f64 / 1024. / 1024.\n"
             "    );\n"
-            "    let tmp = std::env::var(\"SINGLE_BANDWIDTH\")\n",
+            + single_bandwidth_read,
             "    log::info!(\n"
             "        \"TOTAL_BANDWIDTH: {}Mb/s\",\n"
             "        TOTAL_BANDWIDTH.load(Ordering::SeqCst) as f64 / 1024. / 1024.\n"
@@ -614,7 +710,7 @@ def patch_relay_quality_hbbr(upstream: Path) -> None:
             "        \"STARRY_RELAY_MAX_SESSIONS: {}\",\n"
             "        MAX_RELAY_SESSIONS.load(Ordering::SeqCst)\n"
             "    );\n"
-            "    let tmp = std::env::var(\"SINGLE_BANDWIDTH\")\n",
+            + single_bandwidth_read,
         )
 
     content = relay.read_text(encoding="utf-8")
@@ -950,6 +1046,28 @@ mod starry_telemetry_tests {
             "            if speed > highest_s {\n",
         )
 
+    # Upstream's stalled-write and blocklist tests call relay() directly;
+    # the added load_guard parameter must reach those call sites too.
+    if "blocked-send-test" in content:
+        replace_once(
+            relay,
+            '            Limiter::new(1_000_000.), "blocked-send-test".to_owned(),\n'
+            "        )).await.expect(\"a blocked relay write must finish within its deadline\");\n",
+            '            Limiter::new(1_000_000.), "blocked-send-test".to_owned(),\n'
+            '            &mut RelayLoadGuard::try_new().expect("test admission"),\n'
+            "        )).await.expect(\"a blocked relay write must finish within its deadline\");\n",
+        )
+        replace_once(
+            relay,
+            '                    Limiter::new(1_000_000.),\n'
+            '                    "blocklist-test".to_owned(),\n'
+            "                ),\n",
+            '                    Limiter::new(1_000_000.),\n'
+            '                    "blocklist-test".to_owned(),\n'
+            '                    &mut RelayLoadGuard::try_new().expect("test admission"),\n'
+            "                ),\n",
+        )
+
     patch_hbbr_telemetry_observability_v1(relay)
 
 
@@ -969,17 +1087,24 @@ def patch_hbbr_telemetry_observability_v1(relay: Path) -> None:
         "use sodiumoxide::crypto::sign;\n",
         "use sha2::{Digest, Sha256};\nuse sodiumoxide::crypto::{auth, sign};\n",
     )
-    replace_once(
-        relay,
-        '''use std::{
+    legacy_imports = '''use std::{
     collections::{HashMap, HashSet},
     io::prelude::*,
     io::Error,
     net::SocketAddr,
     sync::atomic::{AtomicUsize, Ordering},
 };
-''',
-        '''use std::{
+'''
+    bind_imports = '''use std::{
+    collections::{HashMap, HashSet},
+    io::prelude::*,
+    io::Error,
+    net::{IpAddr, SocketAddr},
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
+};
+'''
+    telemetry_imports = '''use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::prelude::*,
     io::Error,
@@ -991,11 +1116,20 @@ def patch_hbbr_telemetry_observability_v1(relay: Path) -> None:
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-''',
+'''
+    replace_once(
+        relay,
+        legacy_imports if legacy_imports in content else bind_imports,
+        telemetry_imports,
     )
     replace_once(
         relay,
-        "    static ref PEERS: Mutex<HashMap<String, Box<dyn StreamTrait>>> = Default::default();\n",
+        (
+            "    static ref PEERS: Mutex<HashMap<String, Box<dyn StreamTrait>>> "
+            "= Default::default();\n"
+            if "Box<dyn StreamTrait>>> " in content
+            else "    static ref PEERS: Mutex<HashMap<String, WaitingPeer>> = Default::default();\n"
+        ),
         "    static ref PEERS: Mutex<HashMap<String, PendingPeer>> = Default::default();\n",
     )
     replace_once(
@@ -1037,33 +1171,67 @@ const BANDWIDTH_EMA_ALPHA_BASIS_POINTS: u32 = 2_500;
     )
 
     content = relay.read_text(encoding="utf-8")
-    start_call = '''pub async fn start(port: &str, key: &str) -> ResultType<()> {
+    legacy_start = '''pub async fn start(port: &str, key: &str) -> ResultType<()> {
     let key = get_server_sk(key);
 '''
-    replace_once(
-        relay,
-        start_call,
-        '''pub async fn start(port: &str, key: &str) -> ResultType<()> {
-    if sodiumoxide::init().is_err() {
+    bind_start = '''pub async fn start_with_bind(
+    bind_addr: Option<IpAddr>,
+    port: &str,
+    key: &str,
+) -> ResultType<()> {
+    let key = get_server_sk(key)?;
+'''
+    # get_server_sk returns ResultType on bases with the key-permission
+    # hardening, so the injected block must unwrap it accordingly.
+    sodium_init_block = '''    if sodiumoxide::init().is_err() {
         bail!("cannot initialize telemetry authentication");
     }
     let _ = &*TELEMETRY_AUTH_KEY;
     let key = get_server_sk(key);
-    if let Err(error) = crate::relay_enrollment::preflight(&key) {
+'''
+    if legacy_start in content:
+        replace_once(
+            relay,
+            legacy_start,
+            '''pub async fn start(port: &str, key: &str) -> ResultType<()> {
+''' + sodium_init_block + '''    if let Err(error) = crate::relay_enrollment::preflight(&key) {
         bail!("Relay enrollment preflight failed: {error}");
     }
     crate::fast_media_relay::spawn(&key);
 ''',
-    )
+        )
+    else:
+        bind_sodium_init_block = sodium_init_block.replace(
+            "let key = get_server_sk(key);\n",
+            "let key = get_server_sk(key)?;\n",
+        )
+        replace_once(
+            relay,
+            bind_start,
+            '''pub async fn start_with_bind(
+    bind_addr: Option<IpAddr>,
+    port: &str,
+    key: &str,
+) -> ResultType<()> {
+''' + bind_sodium_init_block + '''    if let Err(error) = crate::relay_enrollment::preflight(&key) {
+        bail!("Relay enrollment preflight failed: {error}");
+    }
+    crate::fast_media_relay::spawn(&key);
+''',
+        )
 
+    single_bandwidth_read = (
+        "    let tmp = std::env::var(\"SINGLE_BANDWIDTH\")\n"
+        if "    let tmp = std::env::var(\"SINGLE_BANDWIDTH\")\n" in content
+        else "    let tmp = crate::common::get_arg(\"SINGLE_BANDWIDTH\")\n"
+    )
     replace_once(
         relay,
         '''    log::info!(
         "STARRY_RELAY_MAX_SESSIONS: {}",
         MAX_RELAY_SESSIONS.load(Ordering::SeqCst)
     );
-    let tmp = std::env::var("SINGLE_BANDWIDTH")
-''',
+''' + single_bandwidth_read,
         '''    log::info!(
         "STARRY_RELAY_MAX_SESSIONS: {} (enforced admission limit)",
         MAX_RELAY_SESSIONS.load(Ordering::SeqCst)
@@ -1081,8 +1249,7 @@ const BANDWIDTH_EMA_ALPHA_BASIS_POINTS: u32 = 2_500;
         PROBE_PER_IP_PER_MINUTE.load(Ordering::SeqCst),
         PROBE_GLOBAL_PER_MINUTE.load(Ordering::SeqCst),
     );
-    let tmp = std::env::var("SINGLE_BANDWIDTH")
-''',
+''' + single_bandwidth_read,
     )
 
     helpers = r'''fn starry_version() -> String {
@@ -1713,6 +1880,89 @@ async fn make_pair_(
 }
 
 '''
+    # Bases with the message-size hardening carry relay request bounds and
+    # the port-preserving forwarded-IP rewrite; adopt them in the authored
+    # pairing path instead of regressing to the pre-hardening behaviour.
+    if "const MAX_RELAY_REQUEST_LEN: usize = 128 << 10;" in content:
+        pairing = pairing.replace(
+            """            if let Some(ip) = real_ip {
+                if ip.contains('.') {
+                    addr = format!("{ip}:0").parse().unwrap_or(addr);
+                } else {
+                    addr = format!("[{ip}]:0").parse().unwrap_or(addr);
+                }
+            }
+""",
+            """            if let Some(ip) = real_ip {
+                if let Ok(ip) = ip.parse() {
+                    addr = SocketAddr::new(ip, addr.port());
+                }
+            }
+""",
+        )
+        pairing = pairing.replace(
+            "        let mut ws_stream = "
+            "tokio_tungstenite::accept_hdr_async(stream, callback).await?;\n",
+            """        let ws_config = tungstenite::protocol::WebSocketConfig::default()
+            .read_buffer_size(WS_BUFFER_SIZE)
+            .write_buffer_size(WS_BUFFER_SIZE);
+        let mut ws_stream = timeout(
+            30_000,
+            tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(ws_config)),
+        )
+        .await??;
+""",
+        )
+        pairing = pairing.replace(
+            """    let mut stream = stream;
+    if let Ok(Some(Ok(bytes))) = timeout(30_000, stream.recv()).await {
+""",
+            """    let mut stream = stream;
+    stream.set_max_packet_length(MAX_RELAY_REQUEST_LEN);
+    if let Ok(Some(Ok(bytes))) = timeout(30_000, stream.recv()).await {
+""",
+        )
+        pairing = pairing.replace(
+            """                        if !stream.is_ws() && !peer.is_ws() {
+                            peer.set_raw();
+                            stream.set_raw();
+                            log::info!("Both are raw");
+                        }
+""",
+            """                        if !stream.is_ws() && !peer.is_ws() {
+                            peer.set_raw();
+                            stream.set_raw();
+                            log::info!("Both are raw");
+                        } else {
+                            // A leg that stays framed now carries session data.
+                            peer.set_max_packet_length(usize::MAX);
+                            stream.set_max_packet_length(usize::MAX);
+                        }
+""",
+        )
+        # Upstream keeps expire_waiter for the pair-reuse regression tests;
+        # the span replacement would otherwise delete it.
+        pairing = pairing.replace(
+            """                _ => {}
+            }
+        }
+    }
+}
+""",
+            """                _ => {}
+            }
+        }
+    }
+}
+
+/// Removes a waiting connection only if it still owns the requested pair ID.
+fn expire_waiter(peers: &mut HashMap<String, WaitingPeer>, id: &str, generation: &Arc<()>) {
+    if peers.get(id).map(|(current, _)| Arc::ptr_eq(current, generation)).unwrap_or(false) {
+        peers.remove(id);
+    }
+}
+""",
+        )
     replace_between_once(
         relay,
         "async fn make_pair(\n",
@@ -1740,12 +1990,28 @@ def patch_hbb_common(upstream: Path) -> None:
             'machine-uid = "0.6"',
         )
     content = manifest.read_text(encoding="utf-8")
-    if 'rustls-platform-verifier = "0.7"' not in content:
-        replace_once(
-            manifest,
-            'rustls-platform-verifier = "0.3.1"',
-            'rustls-platform-verifier = "0.7"',
-        )
+    # Upstream hbb_common now routes proxy TLS through its own verifier
+    # module, which fulfils the platform-verifier intent of the legacy
+    # patch; only bases still calling the old tls_config() need it.
+    proxy_content = proxy.read_text(encoding="utf-8")
+    hbb_common_has_verifier_module = (
+        "crate::verifier::client_config(" in proxy_content
+    )
+    if (
+        not hbb_common_has_verifier_module
+        and 'rustls-platform-verifier = "0.7"' not in content
+    ):
+        if 'rustls-platform-verifier = "0.3.1"' in content:
+            replace_once(
+                manifest,
+                'rustls-platform-verifier = "0.3.1"',
+                'rustls-platform-verifier = "0.7"',
+            )
+        elif 'rustls-platform-verifier = "0.6"' not in content:
+            raise RuntimeError(
+                "upstream rustls-platform-verifier declaration changed; "
+                "review the proxy TLS pin"
+            )
 
     content = lib.read_text(encoding="utf-8")
     dlopen_export = '''#[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1755,7 +2021,10 @@ pub use dlopen;
         replace_once(lib, dlopen_export, "")
 
     content = proxy.read_text(encoding="utf-8")
-    if "ClientConfig::with_platform_verifier()" not in content:
+    if (
+        not hbb_common_has_verifier_module
+        and "ClientConfig::with_platform_verifier()" not in content
+    ):
         replace_once(
             proxy,
             "        let verifier = rustls_platform_verifier::tls_config();\n",
@@ -2506,18 +2775,30 @@ struct RelayApplyAck {
         let mmdb_startup = geo_relay::start_mmdb_updater();
         log::info!("{}", mmdb_startup);
 '''
+    # The bind-interface refactor threaded bind_addr through listener
+    # creation; anchor the end of the startup block on whichever form the
+    # base declares.
+    if '        let mut listener = create_tcp_listener(port).await?;\n' in content:
+        tcp_listener_line = (
+            '        let mut listener = create_tcp_listener(port).await?;\n'
+        )
+    else:
+        tcp_listener_line = (
+            '        let mut listener = '
+            'create_tcp_listener(bind_addr, port).await?;\n'
+        )
     if "Starry startup activation acknowledged:" not in content:
         replace_between_once(
             rendezvous,
             '        let upstream_relay_servers = get_arg("relay-servers");\n',
-            '        let mut listener = create_tcp_listener(port).await?;\n',
+            tcp_listener_line,
             startup_activation,
         )
     elif "let prepared_auth = match connection_auth::prepare(" not in content:
         replace_between_once(
             rendezvous,
             '        let upstream_relay_servers = get_arg("relay-servers");\n',
-            '        let mut listener = create_tcp_listener(port).await?;\n',
+            tcp_listener_line,
             startup_activation,
         )
 
@@ -2575,13 +2856,18 @@ struct RelayApplyAck {
         replace_once(rendezvous, result_import, "")
 
     content = rendezvous.read_text(encoding="utf-8")
-    old_register_peer = '''                    if !rp.id.is_empty() {
-                        log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+    # Bases with the peer-id cap guard the registration with MAX_PEER_ID_LEN;
+    # keep that condition while applying the Starry registration rewrite.
+    register_peer_condition = (
+        "                    if !rp.id.is_empty() {\n"
+        if "                    if !rp.id.is_empty() {\n" in content
+        else "                    if !rp.id.is_empty() && rp.id.len() <= MAX_PEER_ID_LEN {\n"
+    )
+    old_register_peer = register_peer_condition + '''                        log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                         self.update_addr(rp.id, addr, socket).await?;
                         if self.inner.serial > rp.serial {
 '''
-    new_register_peer = '''                    if !rp.id.is_empty() {
-                        log::trace!("New peer registered from {:?}", &addr);
+    new_register_peer = register_peer_condition + '''                        log::trace!("New peer registered from {:?}", &addr);
                         let peer_id = rp.id;
                         if self.update_addr(peer_id.clone(), addr, socket).await? {
                             websocket_signal::native_registration(&peer_id).await;
@@ -3576,9 +3862,7 @@ struct RelayApplyAck {
 
     content = rendezvous.read_text(encoding="utf-8")
     if "secure_tcp::negotiate" not in content:
-        replace_once(
-            rendezvous,
-            '''        } else {
+        legacy_tcp_loop = '''        } else {
             let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
             sink = Some(Sink::TcpStream(a));
             while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
@@ -3587,7 +3871,29 @@ struct RelayApplyAck {
                 }
             }
         }
-''',
+'''
+        # Bases with the message-size hardening pre-bind the plain codec to
+        # MAX_MESSAGE; secure_tcp::negotiate enforces its own equivalent
+        # max_frame_bytes bound on every path, so replacing either form is
+        # bound-preserving.
+        bound_tcp_loop = '''        } else {
+            let mut framed = Framed::new(stream, BytesCodec::new());
+            framed.codec_mut().set_max_packet_length(*MAX_MESSAGE);
+            let (a, mut b) = framed.split();
+            sink = Some(Sink::TcpStream(a));
+            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
+                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+                    break;
+                }
+            }
+        }
+'''
+        plain_loop = (
+            legacy_tcp_loop if legacy_tcp_loop in content else bound_tcp_loop
+        )
+        replace_once(
+            rendezvous,
+            plain_loop,
             '''        } else {
             let secure_config = starry_config::snapshot()
                 .map(|config| config.secure_tcp.clone())
@@ -4145,12 +4451,19 @@ struct RelayApplyAck {
 
     content = rendezvous.read_text(encoding="utf-8")
     if "let _ = ws.send_binary(bytes);" not in content:
-        replace_once(
-            rendezvous,
-            '''                    Sink::Ws(ws) => {
+        # tungstenite 0.29 carries Binary payloads as Bytes; route either
+        # declaration into the overlay's send_binary helper.
+        legacy_ws_send = '''                    Sink::Ws(ws) => {
                         allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
                     }
-''',
+'''
+        bytes_ws_send = '''                    Sink::Ws(ws) => {
+                        allow_err!(ws.send(tungstenite::Message::Binary(Bytes::from(bytes))).await);
+                    }
+'''
+        replace_once(
+            rendezvous,
+            legacy_ws_send if legacy_ws_send in content else bytes_ws_send,
             '''                    Sink::Ws(ws) => {
                         let _ = ws.send_binary(bytes);
                     }
@@ -4167,6 +4480,7 @@ struct RelayApplyAck {
             '''    #[inline]
     async fn handle_online_request(
 ''',
+            # (template follows below)
             '''    #[inline]
     async fn handle_punch_hole_request(
         &mut self,
@@ -4311,6 +4625,15 @@ struct RelayApplyAck {
     }
 
 ''',
+        )
+
+    # Bases with the bounded punch-request queue store entries in a
+    # VecDeque, whose append method is push_back rather than push.
+    if "VecDeque<PunchReqEntry>" in content:
+        replace_once(
+            rendezvous,
+            "                    lock.push(PunchReqEntry {\n",
+            "                    lock.push_back(PunchReqEntry {\n",
         )
 
     content = rendezvous.read_text(encoding="utf-8")
@@ -4466,8 +4789,37 @@ struct RelayApplyAck {
             return;
         }
 '''
+    # Bases with the console-reply hardening wrap the reply write in a
+    # deadline; structured local control supersedes either form.
+    bound_loopback_control = '''    async fn handle_listener2(&self, stream: TcpStream, addr: SocketAddr) {
+        let mut rs = self.clone();
+        let ip = try_into_v4(addr).ip();
+        if ip.is_loopback() {
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let mut buffer = [0; 1024];
+                if let Ok(Ok(n)) = timeout(1000, stream.read(&mut buffer[..])).await {
+                    if let Ok(data) = std::str::from_utf8(&buffer[..n]) {
+                        let res = rs.check_cmd(data).await;
+                        if let Err(err) = timeout(1000, stream.write_all(res.as_bytes()))
+                            .await
+                            .unwrap_or_else(|elapsed| Err(elapsed.into()))
+                        {
+                            log::warn!("Failed to send the console reply: {err}");
+                        }
+                    }
+                }
+            });
+            return;
+        }
+'''
     if "local_control::read_request(&mut stream)" not in content:
-        replace_once(rendezvous, legacy_loopback_control, structured_loopback_control)
+        loopback_anchor = (
+            legacy_loopback_control
+            if legacy_loopback_control in content
+            else bound_loopback_control
+        )
+        replace_once(rendezvous, loopback_anchor, structured_loopback_control)
 
     content = rendezvous.read_text(encoding="utf-8")
     legacy_dispatch_arm = '''                    Ok(local_control::IncomingRequest::Legacy(command)) => {
@@ -4741,8 +5093,38 @@ mod starry_allocation_tests {
                     return true;
                 }
 '''
+    # Bases with the relay-UUID hardening validate the request UUID at the
+    # top of the RequestRelay arm; keep that check ahead of the Starry
+    # authorization decision on those bases.
+    uuid_validation_arm = '''                    if let Err(err) = validate_relay_uuid(&rf.uuid) {
+                        log::warn!(
+                            "Drop RequestRelay from {addr}: {err} (length {})",
+                            rf.uuid.len()
+                        );
+                        return false;
+                    }
+'''
     if "Connection authentication denied: kind=punch_hole" not in content:
-        replace_once(rendezvous, old_authenticated_arms, new_authenticated_arms)
+        authenticated_anchor = old_authenticated_arms
+        authenticated_desired = new_authenticated_arms
+        if uuid_validation_arm in content:
+            authenticated_anchor = old_authenticated_arms.replace(
+                '''                Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    // there maybe several attempt, so sink can be none
+''',
+                '''                Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+''' + uuid_validation_arm + '''                    // there maybe several attempt, so sink can be none
+''',
+            )
+            authenticated_desired = new_authenticated_arms.replace(
+                '''                Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    let decision = connection_auth::authorize_connection_attempt(
+''',
+                '''                Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+''' + uuid_validation_arm + '''                    let decision = connection_auth::authorize_connection_attempt(
+''',
+            )
+        replace_once(rendezvous, authenticated_anchor, authenticated_desired)
 
     content = rendezvous.read_text(encoding="utf-8")
     if "let signal_transport;" not in content:
@@ -6419,6 +6801,17 @@ def patch_relay_quality_rendezvous(upstream: Path) -> None:
 
     content = rendezvous.read_text(encoding="utf-8")
     if "relay_quality::decision_for_response(&rr.uuid, effective_addr.ip());" not in content:
+        validated = (
+            "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
+            "                    if let Err(err) = validate_relay_response(&rr.uuid, &rr.relay_server) {\n"
+            "                        log::warn!(\n"
+            "                            \"Drop RelayResponse from {addr}: {err} (length {})\",\n"
+            "                            rr.uuid.len()\n"
+            "                        );\n"
+            "                        return false;\n"
+            "                    }\n"
+            "                    let addr_b = AddrMangle::decode(&rr.socket_addr);\n"
+        )
         legacy = (
             "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
             "                    if let Some(quality_decision) =\n"
@@ -6433,12 +6826,33 @@ def patch_relay_quality_rendezvous(upstream: Path) -> None:
             "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
             "                    let addr_b = AddrMangle::decode(&rr.socket_addr);\n"
         )
-        anchor = legacy if legacy in content else original
+        if validated in content:
+            anchor = validated
+            validated_prefix = (
+                "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
+                "                    if let Err(err) = validate_relay_response(&rr.uuid, &rr.relay_server) {\n"
+                "                        log::warn!(\n"
+                "                            \"Drop RelayResponse from {addr}: {err} (length {})\",\n"
+                "                            rr.uuid.len()\n"
+                "                        );\n"
+                "                        return false;\n"
+                "                    }\n"
+            )
+        elif legacy in content:
+            anchor = legacy
+            validated_prefix = (
+                "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
+            )
+        else:
+            anchor = original
+            validated_prefix = (
+                "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
+            )
         replace_once(
             rendezvous,
             anchor,
-            "                Some(rendezvous_message::Union::RelayResponse(mut rr)) => {\n"
-            "                    let relay_quality_decision =\n"
+            validated_prefix
+            + "                    let relay_quality_decision =\n"
             "                        relay_quality::decision_for_response(&rr.uuid, effective_addr.ip());\n"
             "                    let addr_b = AddrMangle::decode(&rr.socket_addr);\n",
         )

@@ -5,6 +5,32 @@
 本文记录 Starry overlay 的变化。完整产物版本由官方 RustDesk Server 版本与 Starry
 patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
+## 未发布 — 上游适配
+
+### 新增
+
+- 双基线 overlay 支持：锚点同时适配最新正式版（1.1.16）与 1.1.17 之前的上游
+  master，并在新基线上保留上游加固——中继 UUID 与 RelayResponse 校验、打洞
+  请求有界化记录、对端 ID 长度上限、握手后消息上限、保留端口的转发
+  WebSocket IP、有界的 WebSocket 握手与 console 应答。
+- `.gitattributes` 为 `*.json`、`*.toml`、`Cargo.lock`、契约夹具及其他无扩展
+  名文件补充换行规则，保证 Windows 检出时契约摘要依然有效。
+
+### 变更
+
+- 两个基线统一改用 rustdesk-org 的 WebSocket fork（tokio-tungstenite rev
+  c241b11，含 Starry 的 rustls 特性；tungstenite rev efce47e），把针对攻击者
+  声明帧长的提前限制与 Sec-WebSocket-Key 校验带给所有发布基线，而不只是已
+  加固的上游新基线；上游尚未声明该段时，根清单补充 `[patch.crates-io]`。
+- `overlay/Cargo.lock` 针对 1.1.16 基线按 fork 化的 WebSocket 栈重新生成。
+
+### 修复
+
+- Windows 测试套件可移植性：Unix 风格的密钥与 MMDB 路径在所有平台都按绝对
+  路径校验；目录 fsync 屏障按 Unix 门控；ECDSA mTLS 客户端夹具在 Windows 上
+  跳过（schannel 无法导入 P-256 PKCS#8 身份）。Linux 行为不变；套件在
+  Linux 上 142/142、Windows 上 135/135 通过。
+
 ## patch-v1.3.1 — 预览版
 
 完整说明：[`RELEASE-NOTES-patch-v1.3.1.zh-CN.md`](RELEASE-NOTES-patch-v1.3.1.zh-CN.md)

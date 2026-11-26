@@ -1838,13 +1838,19 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32, replace: bool) -> Result<(
             }
         }
     }
-    let directory = OpenOptions::new()
-        .read(true)
-        .open(parent)
-        .map_err(|_| "state_directory_sync_failed".to_owned())?;
-    directory
-        .sync_all()
-        .map_err(|_| "state_directory_sync_failed".to_owned())
+    // Windows cannot fsync a directory handle; the file itself is already
+    // durable and NTFS journals the rename.
+    #[cfg(unix)]
+    {
+        let directory = OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .map_err(|_| "state_directory_sync_failed".to_owned())?;
+        directory
+            .sync_all()
+            .map_err(|_| "state_directory_sync_failed".to_owned())?;
+    }
+    Ok(())
 }
 
 fn existing_file_matches(path: &Path, bytes: &[u8], mode: u32) -> Result<bool, String> {

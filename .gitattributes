@@ -14,3 +14,14 @@
 **/.env.example text eol=lf
 examples/.env.example text eol=lf
 PATCH_VERSION text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+Cargo.lock text eol=lf
+LICENSE text eol=lf
+RELEASE_STATUS text eol=lf
+*.txt text eol=lf
+*.hex text eol=lf
+*.proto text eol=lf
+Dockerfile text eol=lf
+.gitleaksignore text eol=lf
+FROZEN text eol=lf

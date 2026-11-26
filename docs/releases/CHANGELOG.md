@@ -6,6 +6,39 @@ This file records Starry overlay changes. The full artifact version combines
 the official RustDesk Server version with the Starry patch version, for example
 `1.1.16-patch-v1.3.1`.
 
+## Unreleased — upstream adaptation
+
+### Added
+
+- Dual-baseline overlay support: the anchors now apply to both the latest
+  official release (1.1.16) and upstream master ahead of 1.1.17, preserving
+  the upstream hardening on the newer base — relay UUID and RelayResponse
+  validation, bounded punch-request recording, peer-id length caps,
+  post-handshake message bounds, port-preserving forwarded WebSocket IPs,
+  and bounded WebSocket handshakes and console replies.
+- `.gitattributes` line-ending rules for `*.json`, `*.toml`, `Cargo.lock`,
+  contract fixtures, and other extensionless files, so contract digests stay
+  valid on Windows checkouts.
+
+### Changed
+
+- Both bases now use the rustdesk-org WebSocket forks (tokio-tungstenite
+  rev c241b11 with the Starry rustls feature, tungstenite rev efce47e),
+  bringing early frame-size enforcement against attacker-declared frame
+  lengths and Sec-WebSocket-Key validation to every release instead of only
+  post-hardening upstream bases. The root manifest gains the
+  `[patch.crates-io]` section where upstream does not declare it yet.
+- `overlay/Cargo.lock` regenerated for the 1.1.16 base over the forked
+  WebSocket stack.
+
+### Fixed
+
+- Windows test-suite portability: Unix-style secret and MMDB paths validate
+  as absolute on every platform; directory fsync barriers are Unix-gated;
+  the ECDSA mTLS client fixture is gated off on Windows, where schannel
+  cannot import P-256 PKCS#8 identities. Linux behaviour is unchanged; the
+  suite passes 142/142 on Linux and 135/135 on Windows.
+
 ## patch-v1.3.1 — preview
 
 Release notes: [`RELEASE-NOTES-patch-v1.3.1.md`](RELEASE-NOTES-patch-v1.3.1.md)
