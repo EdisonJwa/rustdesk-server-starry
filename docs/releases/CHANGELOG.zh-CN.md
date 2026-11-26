@@ -15,6 +15,10 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
   WebSocket IP、有界的 WebSocket 握手与 console 应答。
 - `.gitattributes` 为 `*.json`、`*.toml`、`Cargo.lock`、契约夹具及其他无扩展
   名文件补充换行规则，保证 Windows 检出时契约摘要依然有效。
+- `上游兼容矩阵`工作流：每次推送、拉取请求和每日运行都把 overlay 应用到当前
+  正式发布与 `master`，并要求两者锚点幂等。正式发布基线还额外门禁审阅过的
+  `Cargo.lock`、编译、全部测试、lint 与所有二进制，使破坏性的上游变更在打出
+  标签之前——而不是发布当天——就暴露出来。
 
 ### 变更
 

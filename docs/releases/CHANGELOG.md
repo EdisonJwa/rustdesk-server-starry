@@ -19,6 +19,12 @@ the official RustDesk Server version with the Starry patch version, for example
 - `.gitattributes` line-ending rules for `*.json`, `*.toml`, `Cargo.lock`,
   contract fixtures, and other extensionless files, so contract digests stay
   valid on Windows checkouts.
+- `Upstream compatibility matrix` workflow: every push, pull request, and day
+  applies the overlay to the current formal release and to `master`, requiring
+  idempotent anchors on both. The release base additionally gates the reviewed
+  `Cargo.lock`, compilation, the full test suite, linting, and every binary, so
+  a breaking upstream change surfaces before a tag is cut instead of on release
+  day.
 
 ### Changed
 
