@@ -306,6 +306,148 @@ fn audit_events_reach_jsonl_for_real_connections() {
         });
 }
 
+#[test]
+fn strategy_groups_enforce_scope_and_deny_without_leaking_existence() {
+    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            sodiumoxide::init().unwrap();
+            let port = reserve_hbbs_ports();
+            let state_dir = std::env::temp_dir().join(format!(
+                "starry-strategy-{}-{port}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&state_dir);
+            fs::create_dir_all(state_dir.join("auth")).unwrap();
+            let strategy_dir = state_dir.join("strategy");
+            let (public, secret) = sign::gen_keypair();
+            fs::write(
+                state_dir.join("auth/jwks.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "keys": [{
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "use": "sig",
+                        "alg": "EdDSA",
+                        "kid": "transport-test-key",
+                        "x": encode_config(public.0, URL_SAFE_NO_PAD)
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let config_path = state_dir.join("config.yaml");
+            fs::write(&config_path, auth_config()).unwrap();
+            let strategy_path = strategy_dir.join("strategy.yaml");
+            fs::create_dir_all(&strategy_dir).unwrap();
+            fs::write(
+                &strategy_path,
+                r#"version: 1
+default_group: general
+groups:
+  - name: general
+  - name: contractors
+    id_prefixes: ["contractor-"]
+    require_scope: "connect:initiate:contractor"
+  - name: retired
+    ids: ["retired-box"]
+    deny: true
+"#,
+            )
+            .unwrap();
+            let child = Command::new(env!("CARGO_BIN_EXE_hbbs"))
+                .arg("--port")
+                .arg(port.to_string())
+                .arg(format!("--starry-config={}", config_path.display()))
+                .env("RUST_LOG", "warn")
+                .env("STARRY_STRATEGY_FILE", &strategy_path)
+                .current_dir(&state_dir)
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let _server = ServerProcess { child, state_dir };
+            wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port))).await;
+            wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port + 2))).await;
+
+            let plain = token(&secret, "rustdesk-connect");
+            let with_group_scope = token_with_scope(
+                &secret,
+                "rustdesk-connect",
+                "connect:initiate connect:initiate:contractor",
+            );
+
+            // A denied-group target must not reveal its existence.
+            let denied_for_retired = native_exchange(port, punch_to("retired-box", &with_group_scope)).await;
+            let denied_generic = native_exchange(port, punch_to("nobody-here", "")).await;
+            assert_eq!(
+                denied_for_retired.write_to_bytes().unwrap(),
+                denied_generic.write_to_bytes().unwrap(),
+                "deny-group refusal must be indistinguishable from any other denial"
+            );
+
+            // A contractor target requires the group scope.
+            let contractor_id = "contractor-1";
+            let mut contractor = register_native_peer(port, contractor_id).await;
+            let missing_scope = native_exchange(port, punch_to(contractor_id, &plain)).await;
+            assert_punch_denied(missing_scope.clone());
+            assert!(
+                contractor.next_timeout(200).await.is_none(),
+                "scope-missing punch must not reach the target"
+            );
+            let accepted = native_exchange(port, punch_to(contractor_id, &with_group_scope)).await;
+            assert_normal_protocol_result(accepted);
+            // The relay path proves the same group-scope allowance end to end.
+            native_request_relay_is_not_denied(
+                port,
+                relay_to(contractor_id, &with_group_scope),
+            )
+            .await;
+        });
+}
+
+fn token_with_scope(secret: &sign::SecretKey, audience: &str, scope: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let header = encode_config(
+        serde_json::to_vec(&json!({
+            "alg": "EdDSA",
+            "kid": "transport-test-key",
+            "typ": "at+jwt"
+        }))
+        .unwrap(),
+        URL_SAFE_NO_PAD,
+    );
+    let payload = encode_config(
+        serde_json::to_vec(&json!({
+            "iss": "https://api.example.test",
+            "aud": audience,
+            "token_use": "access",
+            "scope": scope,
+            "sub": "1002",
+            "user_id": 1_002,
+            "auth_version": 1,
+            "jti": "01941f29-7c30-7000-8000-000000001002",
+            "iat": now.saturating_sub(1),
+            "nbf": now.saturating_sub(1),
+            "exp": now.saturating_add(60)
+        }))
+        .unwrap(),
+        URL_SAFE_NO_PAD,
+    );
+    let signing_input = format!("{header}.{payload}");
+    let signature = sign::sign_detached(signing_input.as_bytes(), secret);
+    format!(
+        "{signing_input}.{}",
+        encode_config(signature.as_ref(), URL_SAFE_NO_PAD)
+    )
+}
+
 fn auth_config() -> &'static str {
     r#"version: 3
 relay_servers:

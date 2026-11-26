@@ -269,7 +269,7 @@ impl AuthRuntime {
         (keys.keys.len(), age, stale)
     }
 
-    fn verify_local_at(&self, token: &str, now: u64) -> Result<LocalClaims, &'static str> {
+    fn verify_local_at(&self, token: &str, now: u64, required_scope_override: Option<&str>) -> Result<LocalClaims, &'static str> {
         if token.is_empty() {
             return Err("missing_token");
         }
@@ -326,8 +326,14 @@ impl AuthRuntime {
         if claims.token_use != self.config.token_use {
             return Err("wrong_token_use");
         }
-        if !claims.scope.contains(&self.config.required_scope) {
-            return Err("missing_scope");
+        let required_scope = required_scope_override
+            .unwrap_or(self.config.required_scope.as_str());
+        if !claims.scope.contains(required_scope) {
+            return Err(if required_scope_override.is_some() {
+                "missing_group_scope"
+            } else {
+                "missing_scope"
+            });
         }
         if claims.user_id == 0 || claims.sub != claims.user_id.to_string() {
             return Err("subject_mismatch");
@@ -351,8 +357,13 @@ impl AuthRuntime {
         })
     }
 
-    async fn authorize_at(&self, token: &str, now: u64) -> Result<(), &'static str> {
-        let local = self.verify_local_at(token, now)?;
+    async fn authorize_at(
+        &self,
+        token: &str,
+        now: u64,
+        required_scope_override: Option<&str>,
+    ) -> Result<(), &'static str> {
+        let local = self.verify_local_at(token, now, required_scope_override)?;
         self.introspect(token, &local, now).await
     }
 
@@ -661,14 +672,22 @@ pub(crate) async fn authorize_connection_attempt(
     kind: ConnectionAttemptKind,
     transport: SignalTransport,
     effective_ip: IpAddr,
+    target: &crate::strategy::TargetCheck,
 ) -> AuthDecision {
-    let decision =
-        authorize_connection_attempt_inner(token, kind, transport, effective_ip).await;
+    let decision = authorize_connection_attempt_inner(
+        token,
+        kind,
+        transport,
+        effective_ip,
+        target.required_scope.as_deref(),
+    )
+    .await;
     crate::audit_log::record_decision(
         kind,
         transport,
         &decision,
         &effective_ip.to_string(),
+        &target.group,
     );
     decision
 }
@@ -678,6 +697,7 @@ async fn authorize_connection_attempt_inner(
     _kind: ConnectionAttemptKind,
     transport: SignalTransport,
     _effective_ip: IpAddr,
+    required_scope_override: Option<&str>,
 ) -> AuthDecision {
     METRICS.attempts.fetch_add(1, Ordering::Relaxed);
     let runtime = ACTIVE
@@ -703,7 +723,7 @@ async fn authorize_connection_attempt_inner(
         };
     }
     let now = epoch_seconds();
-    let result = runtime.authorize_at(token, now).await;
+    let result = runtime.authorize_at(token, now, required_scope_override).await;
     match (runtime.effective_mode, result) {
         (_, Ok(())) => {
             METRICS.allowed.fetch_add(1, Ordering::Relaxed);
@@ -1250,17 +1270,17 @@ mod tests {
     fn strict_fixture_profile_accepts_only_the_active_expected_audience_token() {
         let runtime = fixture_runtime();
         assert!(runtime
-            .verify_local_at(&fixture("active"), 1_893_456_000)
+            .verify_local_at(&fixture("active"), 1_893_456_000, None)
             .is_ok());
         assert_eq!(
             runtime
-                .verify_local_at(&fixture("expired"), 1_893_456_000)
+                .verify_local_at(&fixture("expired"), 1_893_456_000, None)
                 .unwrap_err(),
             "expired"
         );
         assert_eq!(
             runtime
-                .verify_local_at(&fixture("wrong-audience"), 1_893_456_000)
+                .verify_local_at(&fixture("wrong-audience"), 1_893_456_000, None)
                 .unwrap_err(),
             "wrong_audience"
         );
@@ -1270,21 +1290,21 @@ mod tests {
     fn deterministic_token_and_jwks_mutation_corpus_never_panics() {
         let runtime = fixture_runtime();
         let active = fixture("active");
-        let accepted = runtime.verify_local_at(&active, 1_893_456_000);
+        let accepted = runtime.verify_local_at(&active, 1_893_456_000, None);
         assert!(accepted.is_ok());
 
         // Exercise every byte boundary and every individual bit in the signed
         // fixture. This corpus runs in ordinary CI, unlike an opt-in fuzzer,
         // and locks the parser's fail-closed behavior on every build.
         for end in 0..active.len() {
-            let _ = runtime.verify_local_at(&active[..end], 1_893_456_000);
+            let _ = runtime.verify_local_at(&active[..end], 1_893_456_000, None);
         }
         for index in 0..active.len() {
             for bit in 0..8 {
                 let mut mutated = active.as_bytes().to_vec();
                 mutated[index] ^= 1 << bit;
                 let mutated = String::from_utf8_lossy(&mutated);
-                assert!(runtime.verify_local_at(&mutated, 1_893_456_000).is_err());
+                assert!(runtime.verify_local_at(&mutated, 1_893_456_000, None).is_err());
             }
         }
 
@@ -1309,7 +1329,7 @@ mod tests {
                 bytes.push((state & 0x7f) as u8);
             }
             let token = String::from_utf8(bytes).unwrap();
-            let _ = runtime.verify_local_at(&token, 1_893_456_000);
+            let _ = runtime.verify_local_at(&token, 1_893_456_000, None);
         }
     }
 
@@ -1319,19 +1339,19 @@ mod tests {
         let (runtime, secret) = generated_runtime();
         let valid_claims = test_claims();
         let valid = signed_token(&secret, "EdDSA", Some("generated-key"), &valid_claims);
-        assert!(runtime.verify_local_at(&valid, 1_100).is_ok());
+        assert!(runtime.verify_local_at(&valid, 1_100, None).is_ok());
         assert_eq!(
-            runtime.verify_local_at("", 1_100).unwrap_err(),
+            runtime.verify_local_at("", 1_100, None).unwrap_err(),
             "missing_token"
         );
         assert_eq!(
             runtime
-                .verify_local_at(&"x".repeat(runtime.config.max_token_bytes + 1), 1_100)
+                .verify_local_at(&"x".repeat(runtime.config.max_token_bytes + 1), 1_100, None)
                 .unwrap_err(),
             "malformed_token"
         );
         assert_eq!(
-            runtime.verify_local_at("not-a-jwt", 1_100).unwrap_err(),
+            runtime.verify_local_at("not-a-jwt", 1_100, None).unwrap_err(),
             "malformed_token"
         );
         assert_eq!(
@@ -1339,13 +1359,14 @@ mod tests {
                 .verify_local_at(
                     &signed_token(&secret, "HS256", Some("generated-key"), &valid_claims),
                     1_100,
+                    None,
                 )
                 .unwrap_err(),
             "unsupported_alg"
         );
         assert_eq!(
             runtime
-                .verify_local_at(&signed_token(&secret, "EdDSA", None, &valid_claims), 1_100)
+                .verify_local_at(&signed_token(&secret, "EdDSA", None, &valid_claims), 1_100, None)
                 .unwrap_err(),
             "unknown_kid"
         );
@@ -1354,6 +1375,7 @@ mod tests {
                 .verify_local_at(
                     &signed_token(&secret, "EdDSA", Some("removed-key"), &valid_claims),
                     1_100,
+                    None,
                 )
                 .unwrap_err(),
             "unknown_kid"
@@ -1364,6 +1386,7 @@ mod tests {
                 .verify_local_at(
                     &signed_token(&wrong_secret, "EdDSA", Some("generated-key"), &valid_claims,),
                     1_100,
+                    None,
                 )
                 .unwrap_err(),
             "bad_signature"
@@ -1384,7 +1407,7 @@ mod tests {
             let mut claims = valid_claims.clone();
             claims[field] = value;
             let token = signed_token(&secret, "EdDSA", Some("generated-key"), &claims);
-            assert_eq!(runtime.verify_local_at(&token, 1_100).unwrap_err(), reason);
+            assert_eq!(runtime.verify_local_at(&token, 1_100, None).unwrap_err(), reason);
         }
 
         let mut malformed_window = valid_claims;
@@ -1393,7 +1416,7 @@ mod tests {
         malformed_window["nbf"] = json!(900);
         let token = signed_token(&secret, "EdDSA", Some("generated-key"), &malformed_window);
         assert_eq!(
-            runtime.verify_local_at(&token, 900).unwrap_err(),
+            runtime.verify_local_at(&token, 900, None).unwrap_err(),
             "malformed_token"
         );
     }
@@ -1416,7 +1439,7 @@ mod tests {
             Some(epoch_seconds().saturating_sub(3_601));
         assert_eq!(
             runtime
-                .verify_local_at(&fixture("active"), 1_893_456_000)
+                .verify_local_at(&fixture("active"), 1_893_456_000, None)
                 .unwrap_err(),
             "key_stale"
         );
@@ -1491,19 +1514,19 @@ mod tests {
 
                 assert_eq!(
                     runtime
-                        .authorize_at("not-a-compact-jwt", 1_893_456_000)
+                        .authorize_at("not-a-compact-jwt", 1_893_456_000, None)
                         .await
                         .unwrap_err(),
                     "malformed_token"
                 );
                 assert_eq!(requests.load(Ordering::SeqCst), 0);
                 runtime
-                    .authorize_at(&fixture("active"), 1_893_456_000)
+                    .authorize_at(&fixture("active"), 1_893_456_000, None)
                     .await
                     .unwrap();
                 assert_eq!(requests.load(Ordering::SeqCst), 1);
                 runtime
-                    .authorize_at(&fixture("active"), 1_893_456_000)
+                    .authorize_at(&fixture("active"), 1_893_456_000, None)
                     .await
                     .unwrap();
                 assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -1562,7 +1585,7 @@ mod tests {
                 attach_test_introspection(&mut runtime, &url, true, 500);
                 let active = fixture("active");
                 runtime
-                    .authorize_at(&active, 1_893_456_000)
+                    .authorize_at(&active, 1_893_456_000, None)
                     .await
                     .unwrap();
                 server.await.unwrap();
@@ -1595,7 +1618,7 @@ mod tests {
 
                     assert_eq!(
                         runtime
-                            .authorize_at(&fixture("active"), 1_893_456_000)
+                            .authorize_at(&fixture("active"), 1_893_456_000, None)
                             .await
                             .unwrap_err(),
                         "subject_mismatch"
@@ -1622,7 +1645,7 @@ mod tests {
 
                 assert_eq!(
                     runtime
-                        .authorize_at(&fixture("active"), 1_893_456_000)
+                        .authorize_at(&fixture("active"), 1_893_456_000, None)
                         .await
                         .unwrap_err(),
                     "introspection_unavailable"
@@ -1845,10 +1868,10 @@ mod tests {
                 let persisted_freshness = load_jwks_freshness(&cache_path, &rotated, true).unwrap();
                 assert!(persisted_freshness.is_some());
                 let token = signed_token(&secret, "EdDSA", Some("rotated-key"), &test_claims());
-                assert!(runtime.verify_local_at(&token, 1_100).is_ok());
+                assert!(runtime.verify_local_at(&token, 1_100, None).is_ok());
                 assert_eq!(
                     runtime
-                        .verify_local_at(&fixture("active"), 1_893_456_000)
+                        .verify_local_at(&fixture("active"), 1_893_456_000, None)
                         .unwrap_err(),
                     "unknown_kid"
                 );
@@ -1863,7 +1886,7 @@ mod tests {
                 );
                 assert!(runtime.refresh_jwks().await.is_err());
                 server.abort();
-                assert!(runtime.verify_local_at(&token, 1_100).is_ok());
+                assert!(runtime.verify_local_at(&token, 1_100, None).is_ok());
                 assert_eq!(fs::read(&cache_path).unwrap(), rotated);
                 assert!(fs::read_dir(&directory).unwrap().all(|entry| !entry
                     .unwrap()

@@ -31,6 +31,13 @@ the official RustDesk Server version with the Starry patch version, for example
 
 ### Added
 
+- Strategy engine v1: a versioned device-group policy document
+  (`STARRY_STRATEGY_FILE`) with per-group connection JWT scope overrides and
+  group deny verdicts, enforced inside HBBS before any signalling work and
+  recorded in the audit log with the group attached. Reloadable at runtime
+  through local control (`strategy.status` / `strategy.reload`). Server-side
+  enforcement only — client settings sync remains an API-layer concern. See
+  [Strategy v1](../reference/STRATEGY-v1.md).
 - Connection audit log: HBBS records every connection-authentication decision
   as append-only JSONL evidence (kind, transport, verdict, reason, client
   address, mode) behind `STARRY_AUDIT_DIR`. Default off; day rotation, retention

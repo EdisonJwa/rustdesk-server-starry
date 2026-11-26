@@ -12,6 +12,7 @@ mod relay_observer;
 mod relay_quality;
 mod rendezvous_server;
 mod secure_tcp;
+pub mod strategy;
 mod starry_config;
 mod webrtc_signal;
 mod websocket_signal;

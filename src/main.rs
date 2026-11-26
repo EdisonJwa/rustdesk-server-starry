@@ -29,6 +29,12 @@ fn main() -> ResultType<()> {
         -k, --key=[KEY] 'Only allow the client with the same key'",
     );
     init_args(&args, "hbbs", "RustDesk ID/Rendezvous Server");
+    // Strategy v1: load the document once at startup; runtime reloads go
+    // through local control (`strategy.reload`). A broken document logs and
+    // leaves the engine disabled rather than refusing to start.
+    if let Err(err) = hbbs::strategy::reload() {
+        eprintln!("Strategy engine disabled: {err}");
+    }
     let port = get_arg_or("port", RENDEZVOUS_PORT.to_string()).parse::<i32>()?;
     if port < 3 {
         bail!("Invalid port");

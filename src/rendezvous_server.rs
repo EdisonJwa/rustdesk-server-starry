@@ -1058,11 +1058,27 @@ impl RendezvousServer {
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             match msg_in.union {
                 Some(rendezvous_message::Union::PunchHoleRequest(mut ph)) => {
+                    let target = crate::strategy::check_target(&ph.id);
+                    if let Some(reason) = target.deny_reason {
+                        log::warn!(
+                            "Connection authentication denied: kind=punch_hole transport={:?} reason={}",
+                            signal_transport, reason
+                        );
+                        let mut denied = RendezvousMessage::new();
+                        denied.set_punch_hole_response(PunchHoleResponse {
+                            failure: punch_hole_response::Failure::OFFLINE.into(),
+                            other_failure: "connection authorization failed".to_owned(),
+                            ..Default::default()
+                        });
+                        Self::send_to_sink(sink, denied).await;
+                        return false;
+                    }
                     let decision = connection_auth::authorize_connection_attempt(
                         &ph.token,
                         connection_auth::ConnectionAttemptKind::PunchHole,
                         signal_transport,
                         effective_addr.ip(),
+                        &target,
                     )
                     .await;
                     if decision.verdict == "would_deny" {
@@ -1149,11 +1165,26 @@ impl RendezvousServer {
                         );
                         return false;
                     }
+                    let target = crate::strategy::check_target(&rf.id);
+                    if let Some(reason) = target.deny_reason {
+                        log::warn!(
+                            "Connection authentication denied: kind=request_relay transport={:?} reason={}",
+                            signal_transport, reason
+                        );
+                        let mut denied = RendezvousMessage::new();
+                        denied.set_relay_response(RelayResponse {
+                            refuse_reason: "connection authorization failed".to_owned(),
+                            ..Default::default()
+                        });
+                        Self::send_to_sink(sink, denied).await;
+                        return false;
+                    }
                     let decision = connection_auth::authorize_connection_attempt(
                         &rf.token,
                         connection_auth::ConnectionAttemptKind::RequestRelay,
                         signal_transport,
                         effective_addr.ip(),
+                        &target,
                     )
                     .await;
                     if decision.verdict == "would_deny" {
@@ -2172,7 +2203,9 @@ impl RendezvousServer {
                         "peer.verify",
                         "allocation.simulate",
                         "config.runtime_state",
-                        "runtime.reload"
+                        "runtime.reload",
+                        "strategy.status",
+                        "strategy.reload"
                     ],
                     "limits": {"max_frame_bytes": local_control::MAX_FRAME_BYTES}
                 }),
@@ -2306,6 +2339,26 @@ impl RendezvousServer {
                     ),
                 }
             }
+            "strategy.status" if empty_params => {
+                let value = crate::strategy::status();
+                local_control::Response::success(request_id, value)
+            }
+            "strategy.reload" if empty_params => match crate::strategy::reload() {
+                Ok(Some((version, digest))) => local_control::Response::success(
+                    request_id,
+                    serde_json::json!({"ok": true, "version": version, "digest": digest}),
+                ),
+                Ok(None) => local_control::Response::success(
+                    request_id,
+                    serde_json::json!({"ok": true, "enabled": false}),
+                ),
+                Err(err) => local_control::Response::error(
+                    request_id,
+                    "STRATEGY_INVALID",
+                    err,
+                    false,
+                ),
+            },
             "runtime.reload" if empty_params => match self.reload_starry_runtime().await {
                 Ok(ack) => match serde_json::to_value(ack) {
                     Ok(value) => local_control::Response::success(request_id, value),
@@ -2324,7 +2377,7 @@ impl RendezvousServer {
                 ),
             },
             "capabilities" | "status" | "relays" | "config.runtime_state"
-            | "runtime.reload" => local_control::Response::error(
+            | "runtime.reload" | "strategy.status" | "strategy.reload" => local_control::Response::error(
                 request_id,
                 "REQUEST_INVALID",
                 "this local control method does not accept parameters",

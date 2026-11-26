@@ -44,6 +44,7 @@ pub struct AuditEvent {
     pub reason: String,
     pub client_ip: String,
     pub mode: &'static str,
+    pub group: String,
 }
 
 /// Wire labels match the serde snake_case forms used elsewhere.
@@ -104,7 +105,7 @@ impl AuditEvent {
         // fields are ASCII identifiers and escaped strings only.
         format!(
             "{{\"ts\":{},\"kind\":\"{}\",\"transport\":\"{}\",\"verdict\":\"{}\",\
-             \"reason\":\"{}\",\"client_ip\":\"{}\",\"mode\":\"{}\"}}\n",
+             \"reason\":\"{}\",\"client_ip\":\"{}\",\"mode\":\"{}\",\"group\":\"{}\"}}\n",
             self.epoch_seconds,
             kind_label(&self.kind),
             transport_label(&self.transport),
@@ -112,6 +113,7 @@ impl AuditEvent {
             json_escape(&self.reason),
             json_escape(&self.client_ip),
             self.mode,
+            json_escape(&self.group),
         )
     }
 }
@@ -218,6 +220,7 @@ pub(crate) fn record_decision(
     transport: SignalTransport,
     decision: &AuthDecision,
     client_ip: &str,
+    group: &str,
 ) {
     if decision.mode == ConnectionAuthMode::Off {
         return;
@@ -230,6 +233,7 @@ pub(crate) fn record_decision(
         reason: decision.reason.to_owned(),
         client_ip: client_ip.to_owned(),
         mode: mode_label(&decision.mode),
+        group: group.to_owned(),
     });
 }
 
@@ -481,6 +485,7 @@ fn parse_event(line: &str) -> Option<AuditEvent> {
         reason: json_unescape(&field(4)),
         client_ip: json_unescape(&field(5)),
         mode: mode_label(&mode_from_label(&extract_field(line, "\"mode\":\"")?)?),
+        group: extract_field(line, "\"group\":\"").unwrap_or_else(|| "general".to_owned()),
     })
 }
 
@@ -557,6 +562,7 @@ mod tests {
             reason: "quote \" backslash \\ newline \n tab \t".to_owned(),
             client_ip: "192.0.2.7".to_owned(),
             mode: "enforce",
+            group: "contractor".to_owned(),
         };
         let line = event.to_jsonl();
         let parsed = parse_event(line.trim_end()).expect("parse own output");

@@ -26,6 +26,11 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ### 新增
 
+- 策略引擎 v1：版本化的设备组策略文档（`STARRY_STRATEGY_FILE`），按组覆盖
+  连接 JWT 的 scope 要求并支持整组拒绝，在 HBBS 内任何信令工作之前强制执行，
+  审计事件附带组名。支持运行时经本地控制重载
+  （`strategy.status` / `strategy.reload`）。仅服务端强制——客户端设置同步
+  仍是 API 层职责。参见[策略引擎 v1](../reference/STRATEGY-v1.zh-CN.md)。
 - 连接审计日志：HBBS 将每一次连接认证决策记录为只追加的 JSONL 证据（类型、
   传输、判定、原因、客户端地址、模式），由 `STARRY_AUDIT_DIR` 开启。默认关闭；
   按日轮转、保留期清理与单日大小上限三者约束存储；信令路径绝不因日志阻塞。

@@ -21,3 +21,4 @@ starry/mmdb/
 # Server build outputs
 /target/
 src/version.rs
+route-t1/
