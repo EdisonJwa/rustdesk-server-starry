@@ -19,6 +19,14 @@ the official RustDesk Server version with the Starry patch version, for example
 - `.gitattributes` line-ending rules for `*.json`, `*.toml`, `Cargo.lock`,
   contract fixtures, and other extensionless files, so contract digests stay
   valid on Windows checkouts.
+- HBBR operations endpoint: an opt-in, loopback-by-default, read-only
+  supervision listener serving `/healthz` and Prometheus `/metrics` with the
+  same numbers authenticated telemetry reports. It adds no crate, and a public
+  bind requires `STARRY_RELAY_OPS_ALLOW_PUBLIC=1`.
+- Helm chart under `deploy/helm/rustdesk-server-starry`: one HBBS and one HBBR
+  per node on host networking, persistent claims for both, the operations
+  endpoint wired into the HBBR probes, and an optional `ServiceMonitor`.
+  `helm lint` and `kubeconform -strict` cover the rendered objects.
 - `Upstream compatibility matrix` workflow: every push, pull request, and day
   applies the overlay to the current formal release and to `master`, requiring
   idempotent anchors on both. The release base additionally gates the reviewed

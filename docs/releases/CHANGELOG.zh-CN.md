@@ -19,6 +19,12 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
   正式发布与 `master`，并要求两者锚点幂等。正式发布基线还额外门禁审阅过的
   `Cargo.lock`、编译、全部测试、lint 与所有二进制，使破坏性的上游变更在打出
   标签之前——而不是发布当天——就暴露出来。
+- HBBR 运维端点：可选的、默认仅回环、只读的监督监听器，提供 `/healthz` 与
+  Prometheus `/metrics`，数字与认证遥测一致。它不新增任何 crate，公网绑定需要
+  显式设置 `STARRY_RELAY_OPS_ALLOW_PUBLIC=1`。
+- `deploy/helm/rustdesk-server-starry` 下的 Helm chart：每节点一个 HBBS 与一个
+  HBBR 走宿主网络，两者各有持久卷，运维端点已接入 HBBR 探针，并可选用
+  `ServiceMonitor`。渲染对象由 `helm lint` 与 `kubeconform -strict` 覆盖。
 
 ### 变更
 

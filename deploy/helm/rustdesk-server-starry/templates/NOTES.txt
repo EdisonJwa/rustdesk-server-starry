@@ -1,0 +1,27 @@
+Starry RustDesk Server {{ .Values.version }} is installed as {{ include "starry.fullname" . }}.
+
+This release runs one HBBS and one HBBR per node, because both bind the
+canonical RustDesk ports (21115/21116 tcp+udp, 21117) on the host network.
+
+Next steps:
+1. Give clients this node's public address as the ID server.
+2. Copy the centre public key from the HBBS volume
+   (`id_ed25519.pub` under the {{ include "starry.fullname" . }}-hbbs claim)
+   into the client configuration. Never copy `id_ed25519`.
+3. Enable Starry features by setting `hbbs.config` to a Starry configuration
+   document; the schema reference is under docs/reference in the repository.
+{{- if .Values.hbbr.operations.enabled }}
+
+Supervision:
+- HBBR answers `GET {{ .Values.hbbr.operations.listen }}/healthz` and `/metrics`
+  on the node. Keep it on loopback.
+{{- if .Values.hbbr.serviceMonitor.enabled }}
+- The ServiceMonitor scrapes `/metrics` every {{ .Values.hbbr.serviceMonitor.interval }}.
+{{- else }}
+- Set `hbbr.serviceMonitor.enabled=true` to scrape `/metrics` with the
+  Prometheus Operator (requires its CRDs).
+{{- end }}
+{{- end }}
+
+Scaling out means one release per node: a second replica on the same node
+would collide on the fixed ports.

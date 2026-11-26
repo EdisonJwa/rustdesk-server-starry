@@ -1,0 +1,24 @@
+{{- if .Values.hbbr.serviceMonitor.enabled }}
+{{- /*
+  A headless Service that selects the pod and exposes the operations port.
+  The pod uses host networking, so the endpoint address is the node's own IP;
+  this Service exists purely as a ServiceMonitor selector target.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "starry.fullname" . }}-hbbr-metrics
+  labels:
+    {{- include "starry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hbbr-metrics
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "starry.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ops
+      port: {{ include "starry.opsPort" . }}
+      targetPort: {{ include "starry.opsPort" . }}
+      protocol: TCP
+{{- end }}

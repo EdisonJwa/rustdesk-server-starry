@@ -189,6 +189,18 @@ jobs:
             -f examples/control-agent/compose.yaml \
             config --quiet
 
+      - name: Validate the Helm chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/rustdesk-server-starry
+          helm template starry deploy/helm/rustdesk-server-starry > /tmp/chart.yaml
+          helm template starry deploy/helm/rustdesk-server-starry \
+            --set hbbr.serviceMonitor.enabled=true > /tmp/chart-metrics.yaml
+          test "$(grep -c '^kind: ' /tmp/chart.yaml)" -eq 5
+          test "$(grep -c 'kind: PersistentVolumeClaim' /tmp/chart.yaml)" -eq 2
+          grep -q 'STARRY_RELAY_OPS_LISTEN' /tmp/chart.yaml
+          grep -q 'kind: ServiceMonitor' /tmp/chart-metrics.yaml
+
       - name: Validate bilingual documentation and local links
         run: |
           python3 scripts/check_docs.py

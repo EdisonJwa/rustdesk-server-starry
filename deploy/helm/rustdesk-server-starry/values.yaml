@@ -1,0 +1,140 @@
+# Default values for rustdesk-server-starry.
+#
+# Both components bind the fixed RustDesk ports and expect host networking, so
+# a release runs one HBBS and one HBBR per node. Pin `image.digest` in
+# production: the tag and digest must be the same artifact the centre runs.
+
+image:
+  repository: ghcr.io/q1ngyang/rustdesk-server-starry
+  # Prefer a digest for production; set an empty digest to use the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Version must match the image: Starry keeps upstream and overlay versions in
+# lockstep, and the version string is also reported by the operations endpoint.
+version: "1.1.16-patch-v1.3.1"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Fixed RustDesk ports. Changing these requires changing the client
+# configuration too, so they are not templated.
+ports:
+  hbbsId: 21115
+  hbbsSignalTcp: 21116
+  hbbsSignalUdp: 21116
+  hbbsRelay: 21117
+  hbbrRelay: 21117
+  hbbrProbeTcp: 21119
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# HBBS owns the server key pair and the address book; it must be persistent.
+hbbs:
+  # Storage for /root: id_ed25519, id_ed25519.pub, db, and the Starry config.
+  persistence:
+    # existingClaim reuses an operator-managed volume and is the recommended
+    # production path; otherwise a size-constrained claim is created.
+    existingClaim: ""
+    storageClass: ""
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+  # Starry configuration document. See docs/reference for the schema.
+  # Left empty, the image default is used and Starry stays disabled.
+  config: ""
+  resources: {}
+  # Probes use the key files and the listening signal port, because HBBS has
+  # no HTTP surface of its own.
+  livenessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 4
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# HBBR relays traffic and answers Relay quality probes. It shares the server
+# key with HBBS but keeps its own durable relay identity under RELAY_DATA_DIR.
+hbbr:
+  persistence:
+    existingClaim: ""
+    storageClass: ""
+    size: 5Gi
+    accessModes:
+      - ReadWriteOnce
+  # The bundled entrypoint creates the Starry relay identity layout.
+  entrypoint:
+    - starry-relay-entrypoint
+  # Enforcement knobs; all obey the same units the Compose reference uses.
+  relay:
+    singleBandwidthMbps: 128
+    totalBandwidthMbps: 1024
+    limitSpeedMbps: 32
+    maxSessions: 10000
+    probePerIpPerMinute: 120
+    probeGlobalPerMinute: 10000
+    downgradeStartCheckSeconds: 1800
+    downgradeThreshold: "0.66"
+    requirePersistentState: true
+    requireEnrollment: true
+    telemetrySecretFile: ""
+  # The read-only operations endpoint. Keep it on loopback and scrape it with a
+  # sidecar or a ServiceMonitor bound to the same pod, never through a public
+  # Service. Both routes answer GET only.
+  operations:
+    enabled: true
+    listen: 127.0.0.1:21120
+    allowPublic: false
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs in the cluster.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels: {}
+  resources: {}
+  livenessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 4
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Both processes log to stdout; Kubernetes collects it. This only controls
+# verbosity.
+logLevel: info
+
+# Extra environment variables for both containers, for operators who need an
+# upstream knob this chart does not template.
+extraEnv: []
+
+securityContext:
+  # The image entrypoints run as root to read the mounted key material and to
+  # bind the fixed ports; keep the root filesystem read-only and drop the rest.
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  runAsNonRoot: false
+  # Ownership applied to both persistent volumes by the prepare-state init
+  # container. Set to the runtime UID/GID the image uses if it does not run as
+  # root (check with `id` inside the image).
+  volumeOwner:
+    uid: 0
+    gid: 0

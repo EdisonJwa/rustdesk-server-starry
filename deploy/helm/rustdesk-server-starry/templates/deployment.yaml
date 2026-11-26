@@ -1,0 +1,213 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "starry.fullname" . }}
+  labels:
+    {{- include "starry.labels" . | nindent 4 }}
+spec:
+  # The RustDesk ports are fixed, so replicas would collide on one node.
+  # Scale out by adding nodes, one release per node.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "starry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "starry.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ .Values.hbbs.config | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "starry.pullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "starry.serviceAccountName" . }}
+      # Both components bind the canonical RustDesk ports on the node.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Ensure both persistent volumes exist and belong to the runtime user
+        # before either server writes key material into them.
+        - name: prepare-state
+          image: {{ include "starry.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for dir in /state/hbbs /state/hbbr; do
+                mkdir -p "$dir"
+                chown {{ .Values.securityContext.volumeOwner.uid }}:{{ .Values.securityContext.volumeOwner.gid }} "$dir"
+              done
+          {{- include "starry.securityContext" . | nindent 10 }}
+          volumeMounts:
+            - name: hbbs-state
+              mountPath: /state/hbbs
+            - name: hbbr-state
+              mountPath: /state/hbbr
+      containers:
+        - name: hbbs
+          image: {{ include "starry.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - hbbs
+            - --starry-config=/root/starry/config.yaml
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: id
+              containerPort: {{ .Values.ports.hbbsId }}
+              protocol: TCP
+            - name: signal-tcp
+              containerPort: {{ .Values.ports.hbbsSignalTcp }}
+              protocol: TCP
+            - name: signal-udp
+              containerPort: {{ .Values.ports.hbbsSignalUdp }}
+              protocol: UDP
+            - name: hbbs-relay
+              containerPort: {{ .Values.ports.hbbsRelay }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.hbbs.livenessProbe | nindent 12 }}
+            exec:
+              command:
+                - sh
+                - -c
+                - 'test -s /root/id_ed25519 && test -s /root/id_ed25519.pub'
+          readinessProbe:
+            {{- toYaml .Values.hbbs.readinessProbe | nindent 12 }}
+            tcpSocket:
+              port: {{ .Values.ports.hbbsSignalTcp }}
+          {{- with .Values.hbbs.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- include "starry.securityContext" . | nindent 10 }}
+          volumeMounts:
+            - name: hbbs-state
+              mountPath: /root
+            {{- if .Values.hbbs.config }}
+            - name: config
+              mountPath: /root/starry
+              readOnly: true
+            {{- end }}
+        - name: hbbr
+          image: {{ include "starry.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - {{ .Values.hbbr.entrypoint | first | quote }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            - name: RELAY_DATA_DIR
+              value: /var/lib/rustdesk-server-starry/relay
+            - name: STARRY_REQUIRE_PERSISTENT_STATE
+              value: {{ ternary "1" "0" .Values.hbbr.relay.requirePersistentState | quote }}
+            - name: STARRY_REQUIRE_RELAY_ENROLLMENT
+              value: {{ ternary "1" "0" .Values.hbbr.relay.requireEnrollment | quote }}
+            - name: SINGLE_BANDWIDTH
+              value: {{ .Values.hbbr.relay.singleBandwidthMbps | quote }}
+            - name: TOTAL_BANDWIDTH
+              value: {{ .Values.hbbr.relay.totalBandwidthMbps | quote }}
+            - name: LIMIT_SPEED
+              value: {{ .Values.hbbr.relay.limitSpeedMbps | quote }}
+            - name: STARRY_RELAY_MAX_SESSIONS
+              value: {{ .Values.hbbr.relay.maxSessions | quote }}
+            - name: STARRY_RELAY_PROBE_PER_IP_PER_MINUTE
+              value: {{ .Values.hbbr.relay.probePerIpPerMinute | quote }}
+            - name: STARRY_RELAY_PROBE_GLOBAL_PER_MINUTE
+              value: {{ .Values.hbbr.relay.probeGlobalPerMinute | quote }}
+            - name: DOWNGRADE_START_CHECK
+              value: {{ .Values.hbbr.relay.downgradeStartCheckSeconds | quote }}
+            - name: DOWNGRADE_THRESHOLD
+              value: {{ .Values.hbbr.relay.downgradeThreshold | quote }}
+            {{- with .Values.hbbr.relay.telemetrySecretFile }}
+            - name: STARRY_RELAY_TELEMETRY_SECRET_FILE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.hbbr.operations.enabled }}
+            - name: STARRY_RELAY_OPS_LISTEN
+              value: {{ .Values.hbbr.operations.listen | quote }}
+            {{- if .Values.hbbr.operations.allowPublic }}
+            - name: STARRY_RELAY_OPS_ALLOW_PUBLIC
+              value: "1"
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: hbbr-relay
+              containerPort: {{ .Values.ports.hbbrRelay }}
+              protocol: TCP
+            - name: hbbr-probe
+              containerPort: {{ .Values.ports.hbbrProbeTcp }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.hbbr.livenessProbe | nindent 12 }}
+            {{- if .Values.hbbr.operations.enabled }}
+            httpGet:
+              path: /healthz
+              host: {{ include "starry.opsHost" . }}
+              port: {{ include "starry.opsPort" . }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.ports.hbbrRelay }}
+            {{- end }}
+          readinessProbe:
+            {{- toYaml .Values.hbbr.readinessProbe | nindent 12 }}
+            {{- if .Values.hbbr.operations.enabled }}
+            httpGet:
+              path: /healthz
+              host: {{ include "starry.opsHost" . }}
+              port: {{ include "starry.opsPort" . }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.ports.hbbrRelay }}
+            {{- end }}
+          {{- with .Values.hbbr.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- include "starry.securityContext" . | nindent 10 }}
+          volumeMounts:
+            - name: hbbr-state
+              mountPath: /var/lib/rustdesk-server-starry/relay
+      volumes:
+        - name: hbbs-state
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-hbbs" (include "starry.fullname" .)) .Values.hbbs.persistence.existingClaim }}
+        - name: hbbr-state
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-hbbr" (include "starry.fullname" .)) .Values.hbbr.persistence.existingClaim }}
+        {{- if .Values.hbbs.config }}
+        - name: config
+          configMap:
+            name: {{ include "starry.fullname" . }}-config
+        {{- end }}
