@@ -4628,8 +4628,12 @@ struct RelayApplyAck {
         )
 
     # Bases with the bounded punch-request queue store entries in a
-    # VecDeque, whose append method is push_back rather than push.
-    if "VecDeque<PunchReqEntry>" in content:
+    # VecDeque, whose append method is push_back rather than push. Guard on
+    # the pre-rewrite text so a second application stays a no-op.
+    if (
+        "VecDeque<PunchReqEntry>" in content
+        and "                    lock.push(PunchReqEntry {\n" in content
+    ):
         replace_once(
             rendezvous,
             "                    lock.push(PunchReqEntry {\n",
