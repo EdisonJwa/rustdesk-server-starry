@@ -1,0 +1,321 @@
+diff -ruN va/hbb_common/Cargo.toml vb/hbb_common/Cargo.toml
+--- a/hbb_common/Cargo.toml	2026-11-10 08:59:32.000000000 +0000
++++ b/hbb_common/Cargo.toml	2026-11-26 09:52:41.327411371 +0000
+@@ -37,7 +37,6 @@
+ tokio-socks = { git = "https://github.com/rustdesk-org/tokio-socks" }
+ chrono = "0.4"
+ libc = "0.2"
+-dlopen = "0.1"
+ toml = "0.7"
+ uuid = { version = "1.16", features = ["v4"] }
+ # new sysinfo issue: https://github.com/rustdesk/rustdesk/pull/6330#issuecomment-2270871442
+@@ -77,7 +76,7 @@
+ [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+ mac_address = "1.1"
+ default_net = { git = "https://github.com/rustdesk-org/default_net" }
+-machine-uid = { git = "https://github.com/rustdesk-org/machine-uid" }
++machine-uid = "0.6"
+ 
+ [build-dependencies]
+ protobuf-codegen = { version = "3.7" }
+@@ -88,7 +87,7 @@
+ 
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
+-users = { version = "0.11" }
++users = { package = "uzers", version = "0.12" }
+ x11 = "2.21"
+ 
+ # Only takes effect when this crate is built on its own (tests, examples); a consumer's own
+diff -ruN va/hbb_common/protos/rendezvous.proto vb/hbb_common/protos/rendezvous.proto
+--- a/hbb_common/protos/rendezvous.proto	2026-11-10 08:59:32.000000000 +0000
++++ b/hbb_common/protos/rendezvous.proto	2026-11-26 09:52:41.351006500 +0000
+@@ -15,6 +15,10 @@
+ message RegisterPeer {
+   string id = 1;
+   int32 serial = 2;
++  uint64 route_generation = 60;
++  uint64 activation_epoch = 61;
++  bytes route_lease = 62;
++  bytes activation_id = 63;
+ }
+ 
+ enum ConnType {
+@@ -44,6 +48,7 @@
+   // the webrtc:// payload): under force_relay it tells the peer whether the relay is
+   // transport-forced (WebSocket — answer may use full ICE) or policy (Relay-only + TURN).
+   string webrtc_sdp_offer = 12;
++  uint32 relay_quality_protocol = 100;
+ }
+ 
+ message ControlPermissions {
+@@ -81,6 +86,7 @@
+   ControlPermissions control_permissions = 8;
+   ControlledContext controlled_context = 9;
+   string webrtc_sdp_offer = 10;
++  RelayQualityOffer relay_quality_offer = 100;
+ }
+ 
+ message TestNatRequest {
+@@ -108,6 +114,7 @@
+   int32 upnp_port = 6;
+   bytes socket_addr_v6 = 7;
+   string webrtc_sdp_answer = 8;
++  RelayProbeReport relay_quality_report = 100;
+ }
+ 
+ message RegisterPk {
+@@ -116,6 +123,8 @@
+   bytes pk = 3;
+   string old_id = 4;
+   bool no_register_device = 5;
++  uint64 activation_epoch = 61;
++  bytes activation_id = 63;
+ }
+ 
+ message RegisterPkResponse {
+@@ -131,6 +140,10 @@
+   }
+   Result result = 1;
+   int32 keep_alive = 2;
++  uint64 route_generation = 60;
++  uint64 activation_epoch = 61;
++  bytes route_lease = 62;
++  bytes activation_id = 63;
+ }
+ 
+ message PunchHoleResponse {
+@@ -154,6 +167,9 @@
+   int32 upnp_port = 10;
+   bytes socket_addr_v6 = 11;
+   string webrtc_sdp_answer = 12;
++  RelayQualityOffer relay_quality_offer = 100;
++  RelayProbeReport relay_quality_peer_report = 101;
++  RelayQualityDecision relay_quality_decision = 102;
+ }
+ 
+ message ConfigUpdate {
+@@ -173,6 +189,10 @@
+   ControlPermissions control_permissions = 9;
+   ControlledContext controlled_context = 10;
+   string switch_code = 11;
++  RelayProbeReport relay_quality_report = 100;
++  RelayQualityDecision relay_quality_decision = 101;
++  bytes relay_quality_allocation_id = 102;
++  bytes fast_relay_authorization = 64;
+ }
+ 
+ message RelayResponse {
+@@ -189,6 +209,9 @@
+   bytes socket_addr_v6 = 10;
+   int32 upnp_port = 11;
+   string webrtc_sdp_answer = 12;
++  RelayProbeReport relay_quality_report = 100;
++  RelayQualityDecision relay_quality_decision = 101;
++  bytes fast_relay_authorization = 64;
+ }
+ 
+ message SoftwareUpdate { string url = 1; }
+@@ -203,6 +226,7 @@
+   bytes socket_addr_v6 = 3;
+   ControlPermissions control_permissions = 4;
+   ControlledContext controlled_context = 5;
++  RelayQualityOffer relay_quality_offer = 100;
+ }
+ 
+ message LocalAddr {
+@@ -212,6 +236,7 @@
+   string id = 4;
+   string version = 5;
+   bytes socket_addr_v6 = 6;
++  RelayProbeReport relay_quality_report = 100;
+ }
+ 
+ message PeerDiscovery {
+@@ -280,6 +305,160 @@
+   string candidate = 4;
+ }
+ 
++message StarryRelayLoad {
++  uint32 load_basis_points = 1;
++  uint32 active_sessions = 2;
++  uint32 capacity_sessions = 3;
++  uint64 bandwidth_bps = 4;
++  uint64 capacity_bandwidth_bps = 5;
++}
++
++message RelayProbeRequest {
++  uint32 protocol_version = 1;
++  bytes nonce = 2;
++}
++
++message RelayProbeResponse {
++  uint32 protocol_version = 1;
++  bytes nonce = 2;
++  // Retained only for wire compatibility with pre-release v1 implementations.
++  // HBBR MUST leave this unset; detailed load is authenticated telemetry only.
++  StarryRelayLoad load = 3;
++  string starry_version = 4;
++  // Explicit machine-readable capabilities. Never infer these from
++  // starry_version; zero means unsupported/legacy.
++  uint32 relay_probe_protocol = 5;
++  uint32 relay_load_protocol = 6;
++}
++
++message RelayQualityWeights {
++  uint32 rtt = 1;
++  uint32 jitter = 2;
++  uint32 loss = 3;
++  uint32 load = 4;
++}
++
++message RelayQualityCandidate {
++  string relay_server = 1;
++  string probe_url = 2;
++  StarryRelayLoad load = 3;
++  uint32 server_rtt_ms = 4;
++  uint64 observed_at_unix_ms = 5;
++}
++
++message RelayQualityOffer {
++  uint32 protocol_version = 1;
++  bytes allocation_id = 2;
++  string fallback_relay = 3;
++  repeated RelayQualityCandidate candidates = 4;
++  RelayQualityWeights weights = 5;
++  uint32 probe_samples = 6;
++  uint32 probe_interval_ms = 7;
++  uint32 report_timeout_ms = 8;
++  uint32 probe_timeout_ms = 9;
++  // Stable numeric values: 1=adaptive, 2=eager.
++  uint32 strategy = 10;
++  // Stable numeric values: 1=primary, 2=expanded, 3=eager.
++  uint32 stage = 11;
++  // Fresh 16-byte server token. Reports MUST echo the token for this stage.
++  bytes stage_token = 12;
++  uint64 stage_deadline_unix_ms = 13;
++  uint64 total_deadline_unix_ms = 14;
++  string primary_relay = 15;
++  // Applied only to the primary stage. Eager offers set this to zero.
++  uint32 p2p_probe_grace_ms = 16;
++}
++
++message RelayProbeResult {
++  string relay_server = 1;
++  uint32 attempted = 2;
++  uint32 succeeded = 3;
++  uint32 rtt_ms = 4;
++  uint32 jitter_ms = 5;
++}
++
++message RelayProbeReport {
++  uint32 protocol_version = 1;
++  bytes allocation_id = 2;
++  repeated RelayProbeResult results = 3;
++  // Must match the issued offer. Values are defined above.
++  uint32 stage = 4;
++  bytes stage_token = 5;
++  // Stable numeric values: 1=controller, 2=target.
++  uint32 endpoint_role = 6;
++}
++
++message RelayQualityScore {
++  string relay_server = 1;
++  uint32 score = 2;
++  uint32 rtt_penalty = 3;
++  uint32 jitter_penalty = 4;
++  uint32 loss_penalty = 5;
++  uint32 load_penalty = 6;
++  uint32 missing_reports = 7;
++}
++
++message RelayQualityDecision {
++  uint32 protocol_version = 1;
++  bytes allocation_id = 2;
++  string relay_server = 3;
++  repeated RelayQualityScore scores = 4;
++  // Pre-freeze placeholder retained at its original tag. Frozen v1 senders
++  // MUST leave it empty and clients MUST NOT display it.
++  string reason = 5 [deprecated = true];
++  bool fallback = 6;
++  // Stable numeric values: 1=primary_accepted, 2=expanded_best_score,
++  // 3=partial, 4=hysteresis, 5=legacy_fallback, 6=probe_failure,
++  // 7=manual_override.
++  uint32 reason_code = 7;
++  // The terminal measurement stage: 1=primary, 2=expanded, 3=eager.
++  uint32 stage = 8;
++  bool partial = 9;
++}
++
++message RelayQualityCancel {
++  uint32 protocol_version = 1;
++  bytes allocation_id = 2;
++  uint32 stage = 3;
++  bytes stage_token = 4;
++  // Stable numeric values: 1=p2p_succeeded, 2=client_abort.
++  uint32 reason_code = 5;
++  // Stable numeric values: 1=controller, 2=target.
++  uint32 endpoint_role = 6;
++}
++
++message FastRelayAuthorization {
++  uint32 version = 1;
++  string session_uuid = 2;
++  uint64 expires_at = 3;
++  bool allow_fast_compat = 4;
++  bool allow_fast_media_v1 = 5;
++  uint32 max_bitrate_kbps = 6;
++  uint32 relay_udp_protocol = 7;
++  string relay_server = 8;
++  uint32 relay_udp_port = 9;
++  bytes relay_allocation_id = 10;
++  uint32 relay_max_datagram = 11;
++  // Stable values: 1=controller, 2=target.
++  uint32 relay_endpoint_role = 12;
++}
++
++message DeactivatePeer {
++  string id = 1;
++  bytes network_identity_uuid = 2;
++  uint64 activation_epoch = 3;
++  bytes activation_id = 4;
++  bytes route_lease = 5;
++  uint64 route_generation = 6;
++}
++
++message DeactivatePeerResponse {
++  uint64 activation_epoch = 1;
++  bytes activation_id = 2;
++  bool deactivated = 3;
++  uint64 route_generation = 4;
++}
++
+ message RendezvousMessage {
+   oneof union {
+     RegisterPeer register_peer = 6;
+@@ -306,5 +485,13 @@
+     HttpProxyRequest http_proxy_request = 27;
+     HttpProxyResponse http_proxy_response = 28;
+     IceCandidate ice_candidate = 29;
++    RelayProbeRequest relay_probe_request = 100;
++    RelayProbeResponse relay_probe_response = 101;
++    RelayProbeReport relay_quality_stage_report = 102;
++    RelayQualityOffer relay_quality_stage_offer = 103;
++    RelayQualityDecision relay_quality_stage_decision = 104;
++    RelayQualityCancel relay_quality_cancel = 105;
++    DeactivatePeer deactivate_peer = 62;
++    DeactivatePeerResponse deactivate_peer_response = 63;
+   }
+ }
+diff -ruN va/hbb_common/src/lib.rs vb/hbb_common/src/lib.rs
+--- a/hbb_common/src/lib.rs	2026-11-10 08:59:32.000000000 +0000
++++ b/hbb_common/src/lib.rs	2026-11-26 09:52:41.327663641 +0000
+@@ -43,8 +43,6 @@
+ pub mod sh;
+ pub use base64;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+-pub use dlopen;
+-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub use machine_uid;
+ pub use serde_derive;
+ pub use serde_json;

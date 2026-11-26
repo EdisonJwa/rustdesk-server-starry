@@ -6,6 +6,77 @@ This file records Starry overlay changes. The full artifact version combines
 the official RustDesk Server version with the Starry patch version, for example
 `1.1.16-patch-v1.3.1`.
 
+## Unreleased — standalone server, upstream 1.1.17, WebRTC
+
+### Changed
+
+- **Starry is now its own server source tree.** The overlay patcher
+  (`scripts/apply_overlay.py`, 6,700 lines) is retired; `src/`, `tests/`,
+  `Cargo.toml`/`Cargo.lock` and `libs/hbb_common/` are tracked directly. CI
+  builds exactly `git archive HEAD`.
+- `UPSTREAM` records the last reviewed rustdesk-server commit (`680b603`,
+  Cargo version 1.1.17, untagged). Upstream fixes are ported by hand; CI only
+  reports when upstream master moves ahead.
+- `libs/hbb_common` is vendored from rustdesk/hbb_common `bb416bc` (the
+  RustDesk 1.5 client protocol: `IceCandidate`, `webrtc_sdp_*`, KeyExchange v2
+  fields). Starry's edits are exactly `libs/hbb_common.starry.patch`, and CI
+  reproduces the vendored tree from the recorded commit plus that patch.
+  `IdPk` moved into `rendezvous.proto` upstream with an identical wire format.
+- WebSocket support uses upstream's `rustdesk-org` tokio-tungstenite and
+  tungstenite 0.29 forks.
+- Starry settings read from `.env`/`-c` files honour upstream's argument
+  aliases (`STARRY_FOO` and `STARRY-FOO`) through `common::env_var`.
+- Contract checks now require every contract-defined protobuf message to
+  appear verbatim in the vendored `rendezvous.proto`.
+
+### Added
+
+- Connection audit log: HBBS records every connection-authentication decision
+  as append-only JSONL evidence (kind, transport, verdict, reason, client
+  address, mode) behind `STARRY_AUDIT_DIR`. Default off; day rotation, retention
+  pruning, and a per-day size cap bound the storage; the signalling path never
+  blocks on logging. The bundled `starry-audit-export` tool converts day files
+  to RFC 4180 CSV with inclusive UTC date filtering. See
+  [Connection audit log](../reference/AUDIT-LOG.md).
+- `starry-relay-entrypoint` and HBBR expose an opt-in, loopback-only operations
+  endpoint (`STARRY_RELAY_OPS_LISTEN`, off by default) serving `/healthz` and
+  Prometheus `/metrics` with the same numbers authenticated telemetry reports.
+- Opt-in RustDesk 1.5 WebRTC signalling (`--webrtc-signal=Y` or
+  `STARRY_WEBRTC_SIGNAL=Y`, default off): SDP offer/answer and trickle ICE
+  along bounded per-connection routes, offers only from Secure TCP or
+  WebSocket. See [WebRTC signalling](../reference/WEBRTC-SIGNALLING-v1.md).
+
+### Kept from upstream 1.1.17 inside Starry's rewritten paths
+
+- HBBR: 128 KiB bound on the opening relay request, lifted after pairing;
+  30 s bounded WebSocket handshake with 64 KiB buffers; forwarded-IP port
+  preservation; upstream's generation-guarded waiter expiry
+  (`WaitingPeer`/`expire_waiter`); 30 s deadlines on stalled relay writes.
+- HBBS: `validate_relay_uuid`/`validate_relay_response` before every Starry
+  relay step; `MAX_PEER_ID_LEN` on RegisterPeer and RegisterPk (Starry's
+  `process_register_pk` had lost it); the bounded `record_punch_req` log
+  (Starry's punch-hole handler still used the old unbounded push);
+  `MAX_MESSAGE_KB` caps Secure TCP and `/ws/id` frames; `/ws/id` upgrades
+  finish within 30 s and use 8 KiB buffers.
+
+### Fixed
+
+- Geo rules and WebSocket Signal were not initialised at startup without a
+  Starry config when `RUST_LOG` was above `info`: the calls sat inside
+  `log::info!` arguments, which are skipped at that level.
+
+### Security
+
+- The lockfile updates axum 0.5.17, openssl 0.10.82, quick-xml 0.41 (via
+  wayland-scanner), anyhow, bumpalo, rand 0.8.8, crossbeam and ahash within
+  semver, and replaces hbb_common's unmaintained, unsound `users` 0.11 with the
+  API-compatible `uzers` fork (RUSTSEC-2023-0040, -2023-0059, -2025-0040).
+  `cargo audit --deny unsound --deny yanked` passes.
+
+### Removed
+
+- Building on top of an upstream checkout, and support for upstream 1.1.16.
+
 ## patch-v1.3.1 — preview
 
 Release notes: [`RELEASE-NOTES-patch-v1.3.1.md`](RELEASE-NOTES-patch-v1.3.1.md)

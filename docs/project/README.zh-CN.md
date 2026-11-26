@@ -4,15 +4,16 @@
 
 ## 项目介绍
 
-`rustdesk-server-starry` 是官方
+`rustdesk-server-starry` 是源自官方
 [`rustdesk/rustdesk-server`](https://github.com/rustdesk/rustdesk-server)
-的 HBBS 扩展层。它不长期维护一份与上游分离的源码副本，而是在锁定版本的官方源码上
-加入按规则选择中继服务器和登录客户端所需的传输兼容能力。
+的 RustDesk 兼容 ID/中继服务端。它加入按规则选择中继服务器和登录客户端所需的传输
+兼容能力，同时与官方 RustDesk 客户端保持协议兼容。
 
-每次构建都从精确锁定的官方 RustDesk Server 版本开始。
-[`scripts/apply_overlay.py`](../../scripts/apply_overlay.py)
-会验证固定源码锚点并注入 Starry 模块；在同一份源码上第二次执行必须不再产生变化。
-一旦上游结构变化导致锚点或测试失效，发布流程会停止，而不会生成只注入了部分功能的服务端。
+Starry 作为独立源码树维护。[`UPSTREAM`](../../UPSTREAM) 记录最近一次已审查并移植
+的官方服务端提交（当前基线包含 rustdesk-server 2026 年 11 月的安全加固）；RustDesk
+协议库以 `libs/hbb_common` 形式内置，改动单独记录
+（[`libs/hbb_common.VENDORED`](../../libs/hbb_common.VENDORED)）。上游超过已审查
+基线时，CI 会提示。
 
 Starry 为 **HBBS** 增加以下能力：
 
@@ -21,6 +22,8 @@ Starry 为 **HBBS** 增加以下能力：
 - 在 HBBS 原生 `21116/TCP` 端口上提供兼容 RustDesk 客户端的安全 TCP 协商与加密传输；
 - 可选的 `/ws/id` 持久 WebSocket 信令，包括 WSS↔WSS 与 WSS↔原生中继会话；
 - 验证 `/ws/relay` 的证书和可用状态；
+- 可选的 RustDesk 1.5 WebRTC 信令（SDP offer/answer 与 trickle ICE），沿有界的
+  按连接路由转发，见 [WebRTC 信令](../reference/WEBRTC-SIGNALLING-v1.zh-CN.md)；
 - 面向 Akari 的候选 Relay 主动探测，以双端 RTT、jitter、loss 和可信 HBBR load 综合
   评分，并使用网段缓存、迟滞和单 Relay 兼容兜底；
 - 面向 Akari FastCompat/FastMediaV1 的默认关闭短期 Ed25519 授权；只有鉴权严格允许且
@@ -39,7 +42,7 @@ Starry 为 **HBBS** 增加以下能力：
 
 | 组件 | Starry 范围 | 部署责任 |
 | --- | --- | --- |
-| HBBS | 由 Starry 扩展层修改 | 运行 Starry 镜像或发布物中的 `hbbs`。 |
+| HBBS | Starry 服务端核心 | 运行 Starry 镜像或发布物中的 `hbbs`。 |
 | HBBR | 可靠 Relay 与可选 AKR1 UDP | 保留上游 TCP/WS 字节转发，公开质量探测不返回负载；详细状态只通过认证 telemetry，角色授权后可选转发加密 Akari AKF1 datagram。 |
 | 管理代理 | 可选 Starry 组件；v1.3 仅支持 Linux | HBBS 本地控制保持仅本机可用；管理代理只通过私有 mTLS 管理通道访问，默认禁止写入配置。 |
 | 账户/API 服务 | 不包含 | 可搭配兼容的第三方 API；推荐同一开发者维护的 Kessoku。 |
@@ -91,11 +94,11 @@ patch-v1.3.1 候选矩阵包括 Docker `linux/amd64`、Linux x86_64 二进制和
 | [运维与完整验证](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Operations-and-Verification) | 从静态检查到真实桌面会话的分层验收。 |
 | [常见问题排查](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Troubleshooting) | 配置、MMDB、安全 TCP、WSS、HBBR、API 和升级故障。 |
 | [版本升级与回滚](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Upgrade-and-Rollback) | 备份、迁移配置结构、验证版本和安全恢复。 |
-| [架构与构建](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Architecture-and-Build) | 扩展层机制、协议边界、测试与自动发布。 |
+| [架构与构建](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Architecture-and-Build) | 源码结构、跟进上游、协议边界、测试与自动发布。 |
 | [English documentation](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Home) | English documentation home. |
 
 ## 许可证
 
-官方 RustDesk Server 源码与 Starry 扩展层均按 GNU Affero General Public
-License v3.0 发布。二进制和镜像由对应的锁定上游版本加本扩展层构建；详见
+Starry 与其所源自的官方 RustDesk Server 一样，按 GNU Affero General Public
+License v3.0 发布。二进制和镜像由本仓库已跟踪的源码构建；详见
 [`LICENSE`](../../LICENSE)。

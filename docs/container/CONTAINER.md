@@ -17,13 +17,13 @@ Deployment links:
 ## What the image contains
 
 The patch-v1.3.1 development image is built and runtime-tested for `linux/amd64`
-from one pinned official RustDesk Server revision plus the Starry HBBS overlay.
+from this repository's Starry server source.
 ARM remains best-effort source compatibility and is not a promised v1.3.1
 image platform.
 
 | Command | Origin | Intended use |
 | --- | --- | --- |
-| `hbbs` | Official HBBS plus the Starry overlay | ID, rendezvous, signalling, Secure TCP, Geo Relay selection, and optional WebSocket Signal. |
+| `hbbs` | Starry HBBS (derived from official HBBS) | ID, rendezvous, signalling, Secure TCP, Geo Relay selection, and optional WebSocket Signal. |
 | `hbbr` | Upstream data path plus public probe/authenticated telemetry | Built from the same pinned upstream revision as HBBS. It answers Akari quality probes without load details and exposes bounded load/version telemetry only to authenticated HBBS pulls; all supplied examples use the same image tag. |
 | `rustdesk-utils` | Unmodified upstream utility | Key and database maintenance utilities. |
 | `starry-control-agent` | Starry optional Linux management component | Fixed Control API for one local HBBS. It requires mTLS and scoped service JWTs and starts with configuration writes disabled. |
@@ -318,7 +318,7 @@ For symptom-led diagnosis, see
 
 ## Licence and disclosure
 
-The image is distributed under AGPL-3.0 and is built from the pinned official
-RustDesk Server source plus the Starry overlay. It is an unofficial community
+The image is distributed under AGPL-3.0 and is built from the Starry server
+source, which is derived from the official RustDesk Server. It is an unofficial community
 image. It contains no GeoLite2 database. Parts of the code and documentation
 were generated or revised with AI assistance and carry no additional warranty.

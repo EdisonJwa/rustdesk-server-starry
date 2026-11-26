@@ -71,8 +71,10 @@ def main() -> None:
     assert "name: Experimental Windows amd64 compatibility" in build
     assert "continue-on-error: true" in build
     for source_control in (
-        '"refs/tags/${UPSTREAM_REF}:refs/tags/${UPSTREAM_REF}"',
-        'git -C _upstream rev-parse "${UPSTREAM_REF}^{commit}"',
+        "git archive --format=tar HEAD | tar -x -C _server",
+        'upstream_commit="$(sed -n \'s/^commit: //p\' UPSTREAM)"',
+        "git apply --directory=_vendor_check libs/hbb_common.starry.patch",
+        "diff -r _vendor_check/hbb_common libs/hbb_common",
         "upstream_commit: ${{ steps.upstream.outputs.upstream_commit }}",
         "upstream_common_commit: ${{ steps.upstream.outputs.upstream_common_commit }}",
         "upstream_commit=${UPSTREAM_COMMIT}",
@@ -82,13 +84,13 @@ def main() -> None:
             f"upstream source provenance is missing: {source_control}"
         )
     for dependency_lock_control in (
-        "cmp overlay/Cargo.lock _upstream/Cargo.lock",
+        "cmp reviewed.Cargo.lock _server/Cargo.lock",
         "--format-version 1 --locked",
     ):
         assert dependency_lock_control in build, (
             f"fixed dependency verification is missing: {dependency_lock_control}"
         )
-    assert build.count("cargo metadata --manifest-path _upstream/Cargo.toml") == 1, (
+    assert build.count("cargo metadata --manifest-path _server/Cargo.toml") == 1, (
         "workflow must never run unlocked metadata before verifying Cargo.lock"
     )
     cross_config = (ROOT / "Cross.toml").read_text(encoding="utf-8")
@@ -135,32 +137,35 @@ def main() -> None:
         'cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked',
         'test "$(cargo-audit --version)" = "cargo-audit ${CARGO_AUDIT_VERSION}"',
         "cargo audit --db _rustsec-advisory-db --no-fetch",
-        "--file _upstream/Cargo.lock --deny unsound --deny yanked --json",
+        "--file _server/Cargo.lock --deny unsound --deny yanked --json",
         "starry-rustsec-audit-${{ github.sha }}",
     ):
         assert rust_audit_control in build, (
             f"Rust dependency audit is missing fixed control: {rust_audit_control}"
         )
-    overlay = (ROOT / "scripts/apply_overlay.py").read_text(encoding="utf-8")
-    assert 'repo_root / "overlay/Cargo.lock"' in overlay, (
-        "the reviewed Cargo lockfile must be copied into patched source"
+    assert not (ROOT / "scripts/apply_overlay.py").exists(), (
+        "Starry is a standalone server tree; the overlay patcher must not return"
     )
+    manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     for quality_source_control in (
-        "_upstream/libs/hbb_common/protos _upstream/PATCH_VERSION",
-        "_upstream/src/relay_quality.rs",
-        "_upstream/src/fast_relay.rs",
-        "_upstream/src/profile_activation.rs",
+        "_server/src/relay_quality.rs",
+        "_server/src/fast_relay.rs",
+        "_server/src/profile_activation.rs",
         "--test mixed_relay",
         "--test protocol_contract",
     ):
         assert quality_source_control in build, (
             f"build workflow is missing Relay quality verification: {quality_source_control}"
         )
-    lockfile = ROOT / "overlay/Cargo.lock"
+    lockfile = ROOT / "Cargo.lock"
     assert lockfile.is_file(), "the reviewed Cargo lockfile is missing"
     assert hashlib.sha256(lockfile.read_bytes()).hexdigest() == (
-        "e2b18e27daeaaa61c6fd46e8838bcdb4693aa3ae366826994983b051d7915edb"
+        "30421b4a3b6a8da72521d547aa9acfd2e50a98ef90f72ee71a2e533d0bac256a"
     ), "the fixed Cargo dependency graph changed without review"
+    vendored = (ROOT / "libs/hbb_common.VENDORED").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^# commit:  [0-9a-f]{40} ", vendored), (
+        "the vendored hbb_common must record its exact upstream commit"
+    )
     for dependency_control in (
         'tokio-rusqlite = { version = "0.7", features = ["bundled"] }',
         'jsonwebtoken = { version = "9.3.1", default-features = false }',
@@ -168,11 +173,11 @@ def main() -> None:
         'x509-parser = { version = "0.16.0", features = ["verify"] }',
         'rcgen = { version = "0.13.2", features = ["x509-parser"] }',
     ):
-        assert dependency_control in overlay, (
-            f"overlay is missing reviewed dependency control: {dependency_control}"
+        assert dependency_control in manifest, (
+            f"Cargo.toml is missing reviewed dependency control: {dependency_control}"
         )
     lock_text = lockfile.read_text(encoding="utf-8")
-    database_source = (ROOT / "overlay/src/database.rs").read_text(encoding="utf-8")
+    database_source = (ROOT / "src/database.rs").read_text(encoding="utf-8")
     for removed_dependency in (
         'name = "sqlx"',
         'name = "deadpool"',
@@ -182,19 +187,21 @@ def main() -> None:
             f"fixed graph still contains obsolete dependency: {removed_dependency}"
         )
     assert "sqlx" not in database_source and "deadpool" not in database_source, (
-        "database overlay must use the reviewed tokio-rusqlite implementation"
+        "the database layer must use the reviewed tokio-rusqlite implementation"
     )
     for test_control in (
-        "_upstream/src/database.rs",
+        "_server/src/database.rs",
         "components: rustfmt, clippy",
-        "cargo clippy --manifest-path _upstream/Cargo.toml --locked --all-targets -j 1",
+        "cargo clippy --manifest-path _server/Cargo.toml --locked --all-targets -j 1",
         "--bin hbbr -j 1",
         "--test fast_media_relay -j 1",
         "ulimit -n 8192",
         "hbbs_sustains_one_thousand_registered_idle_websockets",
+        "--test webrtc_signal -j 1",
+        "_server/src/webrtc_signal.rs",
     ):
         assert test_control in build, f"build workflow is missing test control: {test_control}"
-    websocket_gate = (ROOT / "overlay/tests/websocket_signal.rs").read_text(
+    websocket_gate = (ROOT / "tests/websocket_signal.rs").read_text(
         encoding="utf-8"
     )
     for websocket_load_control in (

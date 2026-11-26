@@ -1,0 +1,98 @@
+[package]
+name = "hbbs"
+version = "1.1.17"
+authors = ["rustdesk <info@rustdesk.com>"]
+edition = "2021"
+build = "build.rs"
+default-run = "hbbs"
+
+[[bin]]
+name = "hbbr"
+path = "src/hbbr.rs"
+
+[[bin]]
+name = "rustdesk-utils"
+path = "src/utils.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hbb_common = { path = "libs/hbb_common" }
+serde_derive = "1.0"
+serde = "1.0"
+serde_json = "1.0"
+lazy_static = "1.4"
+clap = { version = "3.2.25", default-features = false, features = ["std"] }
+rust-ini = "0.18"
+minreq = { version = "2.4", features = ["punycode"] }
+machine-uid = "0.6"
+mac_address = "1.1.5"
+whoami = "1.2"
+base64 = "0.13"
+axum = { version = "0.5", features = ["headers"] }
+tokio-rusqlite = { version = "0.7", features = ["bundled"] }
+async-trait = "0.1"
+async-speed-limit = { git = "https://github.com/open-trade/async-speed-limit" }
+uuid = { version = "1.0", features = ["v4", "v7"] }
+bcrypt = "0.13"
+chrono = "0.4"
+jsonwebtoken = { version = "9.3.1", default-features = false }
+headers = "0.3"
+once_cell = "1.8"
+sodiumoxide = "0.2"
+tempfile = "3"
+tokio-tungstenite = { git = "https://github.com/rustdesk-org/tokio-tungstenite", rev = "c241b11b03de4881faf1ecd2fe6e867c92f3013b", version = "0.29", features = ["rustls-tls-native-roots"] }
+tungstenite = "0.29"
+regex = "1.4"
+tower-http = { version = "0.3", features = ["fs", "trace", "cors"] }
+http = "1.5"
+flexi_logger = { version = "0.27", features = ["async", "dont_minimize_extra_stacks"] }
+ipnetwork = "0.20"
+local-ip-address = "0.5.1"
+dns-lookup = "1.0.8"
+ping = "0.4.0"
+flate2 = "1.0"
+maxminddb = "0.30"
+serde_yml = { package = "serde_norway", version = "0.9.42" }
+# ed25519 1.5.3 fixes its signature dependency to exclude 2.x.
+ed25519 = "=1.5.3"
+sha2 = "0.10"
+fs2 = "0.4"
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
+libc = "0.2"
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["ring", "tls12"], default-features = false }
+tower = { version = "0.4", features = ["util"] }
+x509-parser = { version = "0.16.0", features = ["verify"] }
+url = "2.2"
+rcgen = { version = "0.13.2", features = ["x509-parser"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# https://github.com/rustdesk/rustdesk-server-pro/issues/189, using native-tls for better tls support
+reqwest = { version = "0.12.28", features = ["blocking", "socks", "json", "native-tls", "gzip"], default-features=false }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+reqwest = { version = "0.12.28", features = ["blocking", "socks", "json", "rustls-tls-native-roots", "gzip"], default-features=false }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[build-dependencies]
+hbb_common = { path = "libs/hbb_common" }
+
+[workspace]
+members = ["libs/hbb_common"]
+exclude = ["ui"]
+
+#https://github.com/johnthagen/min-sized-rust
+#https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles
+[profile.release]
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
+#opt-level = 'z' # only have smaller size after strip # Default is 3, better performance
+#rpath = true # Not needed
+
+[patch.crates-io]
+tungstenite = { git = "https://github.com/rustdesk-org/tungstenite-rs", rev = "efce47e5364f00a63302cf07ab1fb13ded478914" }

@@ -1,0 +1,17 @@
+# Vendored copy of the RustDesk client/server protocol library.
+#
+# origin:  https://github.com/rustdesk/hbb_common
+# commit:  bb416bc94e48fa73046017f8ce4214324146cebe  (master on 2026-11-10; protocol used by RustDesk 1.5 clients:
+#          IceCandidate, webrtc_sdp_offer/answer, KeyExchange v2)
+#
+# Starry's own edits are exactly libs/hbb_common.starry.patch (from the
+# pristine commit above):
+#   - Starry protobuf extensions (tags 60+ / 100+, never colliding with
+#     upstream tags <= 29), see contracts/*/rendezvous-extension.proto;
+#   - crates.io machine-uid 0.6 instead of a git dependency;
+#   - drop the unmaintained dlopen dependency and re-export;
+#   - users 0.11 -> uzers 0.12 (RUSTSEC-2023-0040, -2023-0059, -2025-0040).
+#
+# To re-vendor: export the new upstream commit into libs/hbb_common, run
+#   git apply --directory=libs libs/hbb_common.starry.patch
+# resolve any rejects by hand, regenerate the patch, and update this file.

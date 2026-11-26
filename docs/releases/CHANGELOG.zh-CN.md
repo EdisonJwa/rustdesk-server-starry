@@ -5,6 +5,68 @@
 本文记录 Starry overlay 的变化。完整产物版本由官方 RustDesk Server 版本与 Starry
 patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
+## 未发布 — 独立服务端、上游 1.1.17、WebRTC
+
+### 变更
+
+- **Starry 改为独立的服务端源码树。** 退役 overlay 补丁脚本
+  （`scripts/apply_overlay.py`，6,700 行）；直接跟踪 `src/`、`tests/`、
+  `Cargo.toml`/`Cargo.lock` 与 `libs/hbb_common/`。CI 只构建 `git archive HEAD`。
+- `UPSTREAM` 记录最近一次审查的 rustdesk-server 提交（`680b603`，Cargo 版本 1.1.17，
+  未打 tag）。上游修复人工移植；CI 只在上游 master 超前时提示。
+- `libs/hbb_common` 内置自 rustdesk/hbb_common `bb416bc`（RustDesk 1.5 客户端协议：
+  `IceCandidate`、`webrtc_sdp_*`、KeyExchange v2 字段）。Starry 的改动恰好是
+  `libs/hbb_common.starry.patch`，CI 会用记录的提交加该补丁复现内置目录。上游把
+  `IdPk` 移入 `rendezvous.proto`，线上格式不变。
+- WebSocket 使用上游的 `rustdesk-org` tokio-tungstenite 与 tungstenite 0.29 分支。
+- 从 `.env`/`-c` 读取的 Starry 配置通过 `common::env_var` 兼容上游参数别名
+  （`STARRY_FOO` 与 `STARRY-FOO`）。
+- 契约检查现在要求每个契约定义的 protobuf message 原样出现在内置
+  `rendezvous.proto` 中。
+
+### 新增
+
+- 连接审计日志：HBBS 将每一次连接认证决策记录为只追加的 JSONL 证据（类型、
+  传输、判定、原因、客户端地址、模式），由 `STARRY_AUDIT_DIR` 开启。默认关闭；
+  按日轮转、保留期清理与单日大小上限三者约束存储；信令路径绝不因日志阻塞。
+  随附的 `starry-audit-export` 工具把日文件转换为 RFC 4180 CSV，支持包含边界
+  的 UTC 日期过滤。参见[连接审计日志](../reference/AUDIT-LOG.zh-CN.md)。
+- `starry-relay-entrypoint` 与 HBBR 提供可选的、仅回环的运维端点
+  （`STARRY_RELAY_OPS_LISTEN`，默认关闭），服务 `/healthz` 与 Prometheus
+  `/metrics`，数字与认证遥测报告的一致。
+- 可选的 RustDesk 1.5 WebRTC 信令（`--webrtc-signal=Y` 或
+  `STARRY_WEBRTC_SIGNAL=Y`，默认关闭）：沿有界的按连接路由转发 SDP offer/answer 与
+  trickle ICE，只接受来自 Secure TCP 或 WebSocket 的 offer。见
+  [WebRTC 信令](../reference/WEBRTC-SIGNALLING-v1.zh-CN.md)。
+
+### 在 Starry 重写的路径中保留上游 1.1.17 修复
+
+- HBBR：首个 relay 请求 128 KiB 上限（配对后解除）；30 秒 WebSocket 握手超时与
+  64 KiB 缓冲；保留转发 IP 的端口；上游按代际过期等待者（`WaitingPeer`/
+  `expire_waiter`）；relay 写入卡住 30 秒超时。
+- HBBS：所有 Starry relay 步骤之前先执行 `validate_relay_uuid`/
+  `validate_relay_response`；RegisterPeer 与 RegisterPk 的 `MAX_PEER_ID_LEN`
+  （Starry 的 `process_register_pk` 曾丢失该检查）；有界的 `record_punch_req` 日志
+  （Starry 的 punch-hole 处理仍使用旧的无界写入）；`MAX_MESSAGE_KB` 同时限制
+  Secure TCP 和 `/ws/id` 帧；`/ws/id` 升级须在 30 秒内完成并使用 8 KiB 缓冲。
+
+### 修复
+
+- 没有 Starry 配置文件且 `RUST_LOG` 高于 `info` 时，启动时不会初始化 Geo 规则和
+  WebSocket Signal：这些调用写在 `log::info!` 参数里，该级别下参数不会被执行。
+
+### 安全
+
+- lockfile 在 semver 范围内升级 axum 0.5.17、openssl 0.10.82、quick-xml 0.41
+  （经 wayland-scanner）、anyhow、bumpalo、rand 0.8.8、crossbeam 与 ahash，并把
+  hbb_common 中已停止维护且不健全的 `users` 0.11 换成 API 兼容的 `uzers` 分支
+  （RUSTSEC-2023-0040、-2023-0059、-2025-0040）。`cargo audit --deny unsound
+  --deny yanked` 通过。
+
+### 移除
+
+- 不再基于上游 checkout 构建，也不再支持上游 1.1.16。
+
 ## patch-v1.3.1 — 预览版
 
 完整说明：[`RELEASE-NOTES-patch-v1.3.1.zh-CN.md`](RELEASE-NOTES-patch-v1.3.1.zh-CN.md)

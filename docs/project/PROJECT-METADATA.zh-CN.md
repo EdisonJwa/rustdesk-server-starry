@@ -8,7 +8,7 @@
 
 默认英文描述：
 
-> Unofficial RustDesk Server HBBS overlay with Geo Relay policy, managed MMDB,
+> Unofficial RustDesk-compatible server with Geo Relay policy, managed MMDB,
 > Secure TCP, WebSocket signalling, connection authentication, and bundled
 > version-locked HBBR. API not included.
 

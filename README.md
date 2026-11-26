@@ -4,18 +4,18 @@
 
 ## Project overview
 
-`rustdesk-server-starry` is an HBBS-focused overlay for the official
+`rustdesk-server-starry` is a RustDesk-compatible ID/Relay server derived
+from the official
 [`rustdesk/rustdesk-server`](https://github.com/rustdesk/rustdesk-server).
 It adds policy-driven Relay selection and authenticated-client transport
-compatibility without maintaining a permanently diverged copy of the upstream
-source tree.
+compatibility while staying wire-compatible with stock RustDesk clients.
 
-Every build starts from an exact official RustDesk Server revision. The
-[`scripts/apply_overlay.py`](scripts/apply_overlay.py) script verifies fixed
-source anchors, injects the Starry modules, and must produce no further changes
-when applied a second time. If an upstream structural change invalidates an
-anchor or a test, publication stops instead of producing a partially patched
-server.
+Starry is maintained as its own source tree. [`UPSTREAM`](UPSTREAM) records
+the last official server commit whose changes were reviewed and ported (the
+current baseline includes rustdesk-server's November 2026 hardening), and the
+RustDesk protocol library is vendored as `libs/hbb_common` with a small,
+recorded diff ([`libs/hbb_common.VENDORED`](libs/hbb_common.VENDORED)). CI
+reports when upstream moves past the reviewed baseline.
 
 Starry extends **HBBS** with:
 
@@ -27,6 +27,9 @@ Starry extends **HBBS** with:
 - optional persistent WebSocket signalling on `/ws/id`, including WSS-to-WSS
   and WSS-to-native Relay sessions; and
 - certificate-verified `/ws/relay` health filtering;
+- opt-in RustDesk 1.5 WebRTC signalling (SDP offer/answer and trickle ICE)
+  along bounded per-connection routes, see
+  [WebRTC signalling](docs/reference/WEBRTC-SIGNALLING-v1.md);
 - Akari-only candidate Relay active probing with dual-end RTT/jitter/loss and
   trusted HBBR load scoring, prefix-cache hysteresis, and a legacy single-Relay fallback;
 - default-off, short-lived Ed25519 authorization for Akari FastCompat and
@@ -50,7 +53,7 @@ The project deliberately keeps the component boundary narrow:
 
 | Component | Starry scope | Deployment responsibility |
 | --- | --- | --- |
-| HBBS | Modified by the overlay | Run the Starry `hbbs` binary or image command. |
+| HBBS | Starry server core | Run the Starry `hbbs` binary or image command. |
 | HBBR | Reliable Relay plus optional AKR1 UDP | Keeps the upstream TCP/WS byte-forwarding path, answers public quality probes without load, exposes detailed state only through authenticated telemetry, and optionally routes encrypted Akari AKF1 datagrams after role-bound grants. |
 | Control Agent | Optional Starry component; Linux only in v1.3 | Keep HBBS local control on loopback. Expose the Agent only on a private management path with mTLS and scoped service JWTs. Configuration writes are disabled by default. |
 | Account/API server | Not included | Account login, address books, device data, and administration require a separately selected API implementation. |
@@ -113,12 +116,11 @@ sources, container manual, release notes, and technical references.
 | [Operations and verification](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Operations-and-Verification) | Layered checks from static validation to real desktop sessions. |
 | [Troubleshooting](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Troubleshooting) | Diagnose configuration, MMDB, Secure TCP, WSS, HBBR, API, and upgrade failures. |
 | [Upgrade and rollback](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Upgrade-and-Rollback) | Back up, migrate schema, verify a release, and restore safely. |
-| [Architecture and build](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Architecture-and-Build) | Overlay mechanics, protocol boundaries, tests, and release automation. |
+| [Architecture and build](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Architecture-and-Build) | Source layout, following upstream, protocol boundaries, tests, and release automation. |
 | [简体中文文档](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Home) | 中文文档主页。 |
 
 ## Licence
 
-The official RustDesk Server source and the Starry overlay are distributed
+Starry, like the official RustDesk Server it is derived from, is distributed
 under the GNU Affero General Public License v3.0. Published binaries and images
-are built from the corresponding pinned upstream revision plus this overlay;
-see [`LICENSE`](LICENSE).
+are built from this repository's tracked source; see [`LICENSE`](LICENSE).

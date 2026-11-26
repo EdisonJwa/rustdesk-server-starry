@@ -1,0 +1,13 @@
+# Last official rustdesk/rustdesk-server commit whose changes were reviewed and
+# ported into this repository. Starry is its own source tree; this file is
+# provenance and a tracking point, not a build input. Upstream bumped its
+# Cargo version to 1.1.17 at this commit without tagging a release.
+#
+# To catch up: diff upstream from this commit, port each relevant change into
+# src/ (rendezvous_server.rs, relay_server.rs, common.rs and peer.rs map onto
+# upstream's files), run the full test matrix, then move this pin. CI reports
+# when upstream master is ahead of it.
+#
+# The vendored protocol library has its own record: libs/hbb_common.VENDORED.
+commit: 680b60395ecf99a76f74a1d934e453bb6e5e0aa2
+version: 1.1.17-git.680b603

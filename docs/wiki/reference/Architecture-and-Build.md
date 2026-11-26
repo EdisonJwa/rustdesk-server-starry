@@ -2,10 +2,13 @@
 
 **English** | [简体中文](https://github.com/q1ngyang/rustdesk-server-starry/wiki/ZH-CN-Architecture-and-Build)
 
-Starry is a reproducible source overlay, not a permanent fork of the complete
-RustDesk Server tree. It keeps the official server revision explicit, patches
-HBBS plus an additive HBBR public probe and authenticated telemetry channel, while preserving official-client
-compatibility and the upstream HBBR byte-forwarding data path.
+Starry is its own RustDesk-compatible server source tree. It started from the
+official rustdesk-server and still records the last reviewed upstream baseline
+in [`UPSTREAM`](../../../UPSTREAM), but it is no longer rebuilt by patching
+upstream on every release. Client compatibility comes from the RustDesk
+protocol library, vendored as `libs/hbb_common` with a small, recorded Starry
+diff. HBBR keeps the upstream byte-forwarding data path and adds only the
+public probe and authenticated telemetry channel.
 
 ## Component and traffic boundaries
 
@@ -30,30 +33,32 @@ The separation matters operationally. API success does not prove an HBBS
 handshake. HBBS registration does not prove HBBR reachability. HBBR health does
 not prove a two-client desktop session.
 
-## Overlay layout
+## Source layout
 
 | Path | Purpose |
 | --- | --- |
-| `scripts/apply_overlay.py` | Verifies unique upstream source anchors, copies Starry modules/tests/config template, and injects integration points. |
-| `overlay/src/starry_config.rs` | Strict schema, defaults, cross-field validation, artifact generation, and atomic configuration state. |
-| `overlay/src/geo_relay.rs` and `geo_relay/` | MMDB readers/updater, fact extraction, expression compiler, and ordered Relay selection. |
-| `overlay/src/secure_tcp.rs` | Client-compatible native Secure TCP negotiation, authenticated key exchange, and framed encrypted transport. |
-| `overlay/src/websocket_signal.rs` and `websocket_signal/` | `/ws/id` admission, persistent registration/session routing, resource limits, effective client IP, and Relay health. |
-| `overlay/src/connection_auth.rs` | Ed25519 JWT/JWKS/introspection verification and bounded metrics/cache state. |
-| `overlay/src/relay_observer.rs` and `allocation_explain.rs` | Immutable runtime snapshots and the shared pure allocation-decision core. |
-| `overlay/src/relay_quality.rs` | Candidate offers, bounded report validation, RTT/jitter/loss/load scoring, prefix caching, and hysteresis. |
-| `overlay/src/fast_relay.rs` | Post-selection FastCompat policy gates, Ed25519 authorization signing, source-bound bounded caches, retry reuse, and runtime counters. |
-| `overlay/src/profile_activation.rs` | Node-local route leases, one Native/WSS generation authority, exact-current deactivation, disconnect/TTL cleanup, verified burst limiting, and aggregate counters. |
-| `overlay/src/local_control.rs` | Bounded loopback `STARRYCTL/1` framing and legacy local-command compatibility. |
-| `overlay/src/control_agent.rs` and `control_agent/` | mTLS/RBAC Control API, local client, durable config transactions, audit, history, rollback, and recovery. |
-| `overlay/tests/` | Real-process WebSocket/mixed, connection-auth, local-control, and Control Agent/fault integration tests. |
+| `src/rendezvous_server.rs`, `src/relay_server.rs`, `src/main.rs`, `src/hbbr.rs` | HBBS/HBBR cores, derived from upstream rustdesk-server and maintained here. |
+| `libs/hbb_common/` | Vendored RustDesk protocol library; Starry's edits are exactly `libs/hbb_common.starry.patch`, origin in `libs/hbb_common.VENDORED`. |
+| `src/webrtc_signal.rs` | Opt-in RustDesk 1.5 WebRTC signalling routes (offer/answer, trickle ICE), see [WebRTC signalling](../../reference/WEBRTC-SIGNALLING-v1.md). |
+| `src/starry_config.rs` | Strict schema, defaults, cross-field validation, artifact generation, and atomic configuration state. |
+| `src/geo_relay.rs` and `geo_relay/` | MMDB readers/updater, fact extraction, expression compiler, and ordered Relay selection. |
+| `src/secure_tcp.rs` | Client-compatible native Secure TCP negotiation, authenticated key exchange, and framed encrypted transport. |
+| `src/websocket_signal.rs` and `websocket_signal/` | `/ws/id` admission, persistent registration/session routing, resource limits, effective client IP, and Relay health. |
+| `src/connection_auth.rs` | Ed25519 JWT/JWKS/introspection verification and bounded metrics/cache state. |
+| `src/relay_observer.rs` and `allocation_explain.rs` | Immutable runtime snapshots and the shared pure allocation-decision core. |
+| `src/relay_quality.rs` | Candidate offers, bounded report validation, RTT/jitter/loss/load scoring, prefix caching, and hysteresis. |
+| `src/fast_relay.rs` | Post-selection FastCompat policy gates, Ed25519 authorization signing, source-bound bounded caches, retry reuse, and runtime counters. |
+| `src/profile_activation.rs` | Node-local route leases, one Native/WSS generation authority, exact-current deactivation, disconnect/TTL cleanup, verified burst limiting, and aggregate counters. |
+| `src/local_control.rs` | Bounded loopback `STARRYCTL/1` framing and legacy local-command compatibility. |
+| `src/control_agent.rs` and `control_agent/` | mTLS/RBAC Control API, local client, durable config transactions, audit, history, rollback, and recovery. |
+| `tests/` | Real-process WebSocket/mixed, connection-auth, local-control, and Control Agent/fault integration tests. |
 | `config/` | Full schema example plus deployable feature profiles. |
 | `docker/Dockerfile` | Runtime image containing the release binaries; default command starts Starry HBBS. |
 
-The application script requires exactly one match for every structural anchor.
-If official source changes invalidate an anchor, the build stops. CI applies
-the overlay twice; the second pass must be idempotent and the patched tree must
-pass `git diff --check`.
+CI builds exactly the tracked tree (`git archive HEAD`). It also re-fetches
+the recorded `hbb_common` commit, applies `libs/hbb_common.starry.patch` and
+requires the result to equal `libs/hbb_common`, so the vendored protocol can
+only change through a reviewed patch.
 
 ## Relay decision pipeline
 
@@ -135,44 +140,43 @@ to HBBR. The normative contract is
 These controls reduce configuration and exposure errors; they do not replace
 host hardening, secret management, monitoring, backups, or real-client testing.
 
-## Build from an exact official source
+## Build from source
 
 The canonical procedure is the GitHub Actions workflow. For local audit or
 development on a supported Linux build host:
 
 ```sh
-git clone https://github.com/q1ngyang/rustdesk-server-starry.git
+git clone https://github.com/EdisonJwa/rustdesk-server-starry.git
 cd rustdesk-server-starry
 
-git init _upstream
-git -C _upstream remote add origin \
-  https://github.com/rustdesk/rustdesk-server.git
-git -C _upstream fetch --depth 1 origin 1.1.16
-git -C _upstream checkout --detach FETCH_HEAD
-git -C _upstream submodule update --init --recursive --depth 1
-
-python3 scripts/apply_overlay.py _upstream
-python3 scripts/apply_overlay.py _upstream
-git -C _upstream diff --check
-
-cargo metadata --manifest-path _upstream/Cargo.toml \
-  --format-version 1 >/dev/null
-cargo test --manifest-path _upstream/Cargo.toml --locked --lib -j 1
-cargo check --manifest-path _upstream/Cargo.toml --locked --bins -j 1
-cargo test --manifest-path _upstream/Cargo.toml --locked \
-  --test websocket_signal -j 1 -- --nocapture
-cargo test --manifest-path _upstream/Cargo.toml --locked \
-  --test mixed_relay -j 1 -- --nocapture
-cargo build --manifest-path _upstream/Cargo.toml --locked --release --bins
+cargo metadata --format-version 1 --locked >/dev/null
+cargo test --locked --lib -j 1
+cargo check --locked --bins -j 1
+cargo test --locked --test websocket_signal -j 1 -- --nocapture
+cargo test --locked --test mixed_relay -j 1 -- --nocapture
+cargo test --locked --test webrtc_signal -j 1 -- --nocapture
+cargo build --locked --release --bins
 ```
 
-Replace `1.1.16` only with a reviewed official release reference. Official
-RustDesk Server build prerequisites and Rust toolchain requirements also apply.
-An overlay anchor failure is a request to review upstream changes, not an error
-to bypass with a broad search-and-replace.
+### Following upstream
 
-The resulting `hbbs` contains Starry changes. `hbbr` keeps upstream session
-forwarding plus the additive public probe/authenticated telemetry surface; `rustdesk-utils` is unchanged.
+Upstream fixes are ported by hand. [`UPSTREAM`](../../../UPSTREAM) names the
+last rustdesk-server commit whose changes were reviewed and carried over; the
+nightly workflow summary reports when upstream master moves past it. To catch
+up, diff upstream from that commit, port each relevant change into `src/`
+(the cores map one-to-one onto upstream's `rendezvous_server.rs`,
+`relay_server.rs`, `common.rs` and `peer.rs`), and then update `UPSTREAM`.
+
+To re-vendor `hbb_common`, export the new upstream commit into
+`libs/hbb_common`, run
+`git apply --directory=libs libs/hbb_common.starry.patch`, resolve any rejects,
+regenerate the patch from the pristine commit, and update
+`libs/hbb_common.VENDORED`. Starry's protobuf extensions use tags 60+ and 100+
+so they never collide with upstream fields.
+
+`hbbs` carries the Starry features. `hbbr` keeps upstream session forwarding
+plus the additive public probe/authenticated telemetry surface;
+`rustdesk-utils` is unchanged.
 
 ## Automated release gates
 
@@ -180,8 +184,8 @@ The workflow resolves the official ref and constructs
 `<upstream>-patch-v<PATCH_VERSION>`. Before publication it performs:
 
 - Compose static validation;
-- exact shallow upstream checkout and recursive submodules;
-- twice-applied overlay/idempotency and dependency-lock checks;
+- the tracked source tree, the reproduced vendored `hbb_common`, and the
+  locked dependency graph;
 - Rust formatting, all library tests, and all server-binary checks;
 - real-process WSS registration and cross-transport signalling tests;
 - active Relay probe/authenticated-telemetry checks plus mixed WebSocket/native traffic through
@@ -223,7 +227,7 @@ hbbs --starry-config=/root/starry/config.yaml
 The recommended Compose files use one pinned Starry image tag for both HBBS
 and HBBR. This prevents independently updated images from drifting while the
 command boundary still makes the modification scope explicit: `hbbs` contains
-the selection overlay and bundled `hbbr` preserves upstream forwarding while
+the Starry selection logic and bundled `hbbr` preserves upstream forwarding while
 adding only the public quality-probe and authenticated-telemetry control surface.
 
 Release checksums cover downloadable assets. Portable Sigstore bundles and
@@ -239,7 +243,7 @@ When changing either upstream or patch version:
 
 1. review upstream source and protocol changes;
 2. update `PATCH_VERSION` only for a Starry feature/fix release;
-3. re-run the overlay against the exact candidate source;
+3. port any upstream changes past [`UPSTREAM`](../../../UPSTREAM) and run the full test matrix;
 4. update both release-note languages, changelog, image examples, and upgrade
    notes;
 5. verify all published examples and relative links;

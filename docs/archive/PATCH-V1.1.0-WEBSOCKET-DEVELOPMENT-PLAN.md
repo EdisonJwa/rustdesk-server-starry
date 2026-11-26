@@ -841,10 +841,10 @@ patch-v1.1.0 不给原生客户端引入额外网络跳转。NativeOnly 路径�
 
 ## 26. 参考基线
 
-- [当前 Starry overlay 注入脚本](../../scripts/apply_overlay.py)
+- [当前 Starry overlay 注入脚本](../wiki/reference/Architecture-and-Build.md)
 - [当前外部配置示例](../../config/config.example.yaml)
-- [当前 Secure TCP 实现](../../overlay/src/secure_tcp.rs)
-- [当前 Geo Relay 实现](../../overlay/src/geo_relay.rs)
+- [当前 Secure TCP 实现](../../src/secure_tcp.rs)
+- [当前 Geo Relay 实现](../../src/geo_relay.rs)
 - [官方 rustdesk-server 1.1.16 HBBS](https://github.com/rustdesk/rustdesk-server/blob/1.1.16/src/rendezvous_server.rs)
 - [官方 rustdesk-server 1.1.16 HBBR](https://github.com/rustdesk/rustdesk-server/blob/1.1.16/src/relay_server.rs)
 - [RustDesk 1.4.9 持久信令客户端](https://github.com/rustdesk/rustdesk/blob/1.4.9/src/rendezvous_mediator.rs)

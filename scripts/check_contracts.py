@@ -16,6 +16,44 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS = ROOT / "contracts"
 
 
+
+def server_sources() -> str:
+    """The Starry server code and vendored protocol that contracts bind to."""
+    paths = [
+        ROOT / "Cargo.toml",
+        ROOT / "libs/hbb_common/protos/rendezvous.proto",
+        *sorted((ROOT / "src").rglob("*.rs")),
+    ]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
+def proto_messages(text: str) -> dict[str, str]:
+    """Top-level protobuf message blocks, whitespace-normalised, by name."""
+    messages = {}
+    for match in re.finditer(r"(?m)^message (\w+) \{", text):
+        depth = 0
+        for index in range(match.end() - 1, len(text)):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    block = re.sub(r"//[^\n]*", "", text[match.start():index + 1])
+                    messages[match.group(1)] = " ".join(block.split())
+                    break
+    return messages
+
+
+def assert_contract_messages_vendored(contract: str) -> None:
+    """Every message a contract defines must be in the vendored proto verbatim."""
+    vendored = proto_messages(
+        (ROOT / "libs/hbb_common/protos/rendezvous.proto").read_text(encoding="utf-8")
+    )
+    for name, block in proto_messages(contract).items():
+        assert vendored.get(name) == block, (
+            f"vendored rendezvous.proto drifted from the contract for message {name}"
+        )
+
 def read_json(path: Path) -> object:
     with path.open("r", encoding="utf-8") as stream:
         return json.load(stream)
@@ -430,13 +468,12 @@ def check_patch_v131_frozen_candidate() -> None:
 def check_release_version() -> None:
     patch_version = (ROOT / "PATCH_VERSION").read_text(encoding="utf-8").strip()
     assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", patch_version)
-    agent = (ROOT / "overlay/src/control_agent.rs").read_text(encoding="utf-8")
+    agent = (ROOT / "src/control_agent.rs").read_text(encoding="utf-8")
     assert (
         f'const STARRY_PATCH_VERSION: &str = "{patch_version}";' in agent
     ), "Control Agent capability version must match PATCH_VERSION"
-    overlay = (ROOT / "scripts/apply_overlay.py").read_text(encoding="utf-8")
-    assert 'repo_root / "PATCH_VERSION"' in overlay
-    assert 'include_str!(\\"../PATCH_VERSION\\").trim()' in overlay
+    overlay = server_sources()
+    assert 'include_str!("../PATCH_VERSION").trim()' in overlay
     assert '"x-starry-version"' in overlay
     for public_capability_header in (
         "x-starry-relay-probe-protocol",
@@ -452,7 +489,7 @@ def check_release_version() -> None:
         assert authenticated_telemetry_header in overlay
     assert "STARRY_RELAY_TELEMETRY_SECRET_FILE" in overlay
     assert "response.load.is_none()" in (
-        ROOT / "overlay/tests/mixed_relay.rs"
+        ROOT / "tests/mixed_relay.rs"
     ).read_text(encoding="utf-8")
 
     summary = build_summary(
@@ -508,8 +545,8 @@ def check_relay_quality_protocol() -> None:
     contract = (
         CONTRACTS / "relay-quality/v1/rendezvous-extension.proto"
     ).read_text(encoding="utf-8")
-    overlay = (ROOT / "scripts/apply_overlay.py").read_text(encoding="utf-8")
-    implementation = (ROOT / "overlay/src/relay_quality.rs").read_text(encoding="utf-8")
+    overlay = server_sources()
+    implementation = (ROOT / "src/relay_quality.rs").read_text(encoding="utf-8")
     for message in (
         "StarryRelayLoad",
         "RelayProbeRequest",
@@ -531,8 +568,7 @@ def check_relay_quality_protocol() -> None:
     ):
         assert capability_field in contract
         assert capability_field in overlay
-    assert 'upstream / "contracts/relay-quality/v1/rendezvous-extension.proto"' in overlay
-    assert 'marker = "message StarryRelayLoad {"' in overlay
+    assert_contract_messages_vendored(contract)
     bindings = {
         "uint32 relay_quality_protocol = 100;",
         "RelayQualityOffer relay_quality_offer = 100;",
@@ -574,8 +610,8 @@ def check_fast_relay_protocol() -> None:
     contract = (
         CONTRACTS / "fast-relay/v1/rendezvous-extension.proto"
     ).read_text(encoding="utf-8")
-    overlay = (ROOT / "scripts/apply_overlay.py").read_text(encoding="utf-8")
-    implementation = (ROOT / "overlay/src/fast_relay.rs").read_text(encoding="utf-8")
+    overlay = server_sources()
+    implementation = (ROOT / "src/fast_relay.rs").read_text(encoding="utf-8")
     assert "message FastRelayAuthorization {" in contract
     for field in (
         "uint32 version = 1;",
@@ -592,8 +628,8 @@ def check_fast_relay_protocol() -> None:
         "uint32 relay_endpoint_role = 12;",
     ):
         assert field in contract
-    assert 'upstream / "contracts/fast-relay/v1/rendezvous-extension.proto"' in overlay
-    assert '"bytes fast_relay_authorization = 64;"' in overlay
+    assert_contract_messages_vendored(contract)
+    assert "bytes fast_relay_authorization = 64;" in overlay
     for control in (
         "ENDPOINT_CONTROLLER",
         "ENDPOINT_TARGET",
@@ -617,7 +653,7 @@ def check_fast_media_and_pairing_protocols() -> None:
     assert wire["authorization"]["required_fields"] == list(range(1, 13))
     assert wire["authorization"]["relay_max_datagram_range"] == [608, 1400]
     assert wire["privacy"]["relay_has_media_keys"] is False
-    implementation = (ROOT / "overlay/src/fast_media_relay.rs").read_text(
+    implementation = (ROOT / "src/fast_media_relay.rs").read_text(
         encoding="utf-8"
     )
     for invariant in (
@@ -641,7 +677,7 @@ def check_fast_media_and_pairing_protocols() -> None:
     assert definitions["relayBundle"]["properties"]["telemetry_secret"][
         "x-sensitive"
     ] is True
-    pairing_source = (ROOT / "overlay/src/pairing.rs").read_text(encoding="utf-8")
+    pairing_source = (ROOT / "src/pairing.rs").read_text(encoding="utf-8")
     for binding in (
         "broker_spki_sha256",
         "configuration_digest",
@@ -657,8 +693,8 @@ def check_profile_activation_protocol() -> None:
     contract = (
         CONTRACTS / "profile-activation/v1/rendezvous-extension.proto"
     ).read_text(encoding="utf-8")
-    overlay = (ROOT / "scripts/apply_overlay.py").read_text(encoding="utf-8")
-    implementation = (ROOT / "overlay/src/profile_activation.rs").read_text(
+    overlay = server_sources()
+    implementation = (ROOT / "src/profile_activation.rs").read_text(
         encoding="utf-8"
     )
     assert "message DeactivatePeer {" in contract
@@ -671,14 +707,15 @@ def check_profile_activation_protocol() -> None:
     ):
         assert field in contract
     for additive in (
-        '"uint64 route_generation = 60;"',
-        '"uint64 activation_epoch = 61;"',
-        '"bytes route_lease = 62;"',
-        '"bytes activation_id = 63;"',
-        '"DeactivatePeer deactivate_peer = 62;"',
-        '"DeactivatePeerResponse deactivate_peer_response = 63;"',
+        "uint64 route_generation = 60;",
+        "uint64 activation_epoch = 61;",
+        "bytes route_lease = 62;",
+        "bytes activation_id = 63;",
+        "DeactivatePeer deactivate_peer = 62;",
+        "DeactivatePeerResponse deactivate_peer_response = 63;",
     ):
         assert additive in overlay
+    assert_contract_messages_vendored(contract)
     assert "BURST_LIMIT: usize = 12" in implementation
     assert "BURST_WINDOW_SECONDS: u64 = 30" in implementation
     assert "LEASE_TTL_SECONDS: u64 = 45" in implementation

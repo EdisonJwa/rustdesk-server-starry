@@ -14,7 +14,7 @@ bounded Akari probes, and authenticated telemetry.
 
 | Component | Role | Supplied or changed by Starry? |
 | --- | --- | --- |
-| Starry HBBS | Registers peers, coordinates connections, negotiates Secure TCP, evaluates Geo rules, and selects a Relay. | **Modified** by the overlay. |
+| Starry HBBS | Registers peers, coordinates connections, negotiates Secure TCP, evaluates Geo rules, and selects a Relay. | Starry server core. |
 | Starry-image HBBR | Carries reliable Relay data and optionally routes encrypted FastMedia datagrams. | The upstream TCP/WS byte path stays reliable. Starry adds bounded quality probes, authenticated telemetry, and separately supervised AKR1 UDP. |
 | Starry Control Agent | Exposes a fixed management API for one local HBBS over mTLS and scoped service JWTs. | Optional Linux component. Configuration writes are disabled by default. |
 | Account/API server | Handles login, address books, device data, and administration. | **Not included**. A compatible third-party API can be used; Kessoku is the recommended integration. |
