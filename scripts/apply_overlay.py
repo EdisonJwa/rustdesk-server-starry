@@ -104,6 +104,7 @@ def copy_overlay(repo_root: Path, upstream: Path) -> None:
     shutil.copyfile(repo_root / "overlay/Cargo.lock", upstream / "Cargo.lock")
     for name in (
         "allocation_explain.rs",
+        "audit_log.rs",
         "connection_auth.rs",
         "config_downgrade.rs",
         "control_agent.rs",
@@ -2356,6 +2357,7 @@ def patch_modules(upstream: Path) -> None:
         replace_once(
             lib,
             "mod rendezvous_server;\n",
+            "pub mod audit_log;\n"
             "mod allocation_explain;\n"
             "mod connection_auth;\n"
             "pub mod control_agent;\n"

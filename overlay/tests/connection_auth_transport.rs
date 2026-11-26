@@ -20,6 +20,7 @@ use hbb_common::{
 };
 use serde_json::{json, Value};
 use sodiumoxide::crypto::{box_, secretbox, sign};
+use std::sync::{Arc, Mutex};
 use std::{
     fs,
     net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
@@ -49,8 +50,14 @@ impl Drop for ServerProcess {
     }
 }
 
+/// HBBS ports are reserved by binding and releasing before the server binds
+/// them for real; two tests racing through that window steal each other's
+/// ports, so the e2e tests run one at a time.
+static TRANSPORT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn jwt_enforcement_covers_native_secure_tcp_websocket_and_udp_stays_unsupported() {
+    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     Builder::new_current_thread()
         .enable_all()
         .build()
@@ -183,6 +190,119 @@ fn jwt_enforcement_covers_native_secure_tcp_websocket_and_udp_stays_unsupported(
                     .unwrap()
                     >= 3
             );
+        });
+}
+
+#[test]
+fn audit_events_reach_jsonl_for_real_connections() {
+    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            sodiumoxide::init().unwrap();
+            let port = reserve_hbbs_ports();
+            let state_dir = std::env::temp_dir().join(format!(
+                "starry-connection-audit-{}-{port}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&state_dir);
+            fs::create_dir_all(state_dir.join("auth")).unwrap();
+            let audit_dir = state_dir.join("audit");
+            let (public, secret) = sign::gen_keypair();
+            fs::write(
+                state_dir.join("auth/jwks.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "keys": [{
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "use": "sig",
+                        "alg": "EdDSA",
+                        "kid": "transport-test-key",
+                        "x": encode_config(public.0, URL_SAFE_NO_PAD)
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let config_path = state_dir.join("config.yaml");
+            fs::write(&config_path, auth_config()).unwrap();
+            let local_control_token_path = state_dir.join("local-control.token");
+            fs::write(&local_control_token_path, format!("{LOCAL_AUTH_TOKEN}\n")).unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(&local_control_token_path, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let child = Command::new(env!("CARGO_BIN_EXE_hbbs"))
+                .arg("--port")
+                .arg(port.to_string())
+                .arg(format!("--starry-config={}", config_path.display()))
+                .env("RUST_LOG", "warn")
+                .env("STARRY_LOCAL_CONTROL_TOKEN_FILE", &local_control_token_path)
+                .env("STARRY_AUDIT_DIR", &audit_dir)
+                .current_dir(&state_dir)
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let _server = ServerProcess { child, state_dir: state_dir.clone() };
+            wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port))).await;
+            wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port + 2))).await;
+
+            let active = token(&secret, "rustdesk-connect");
+            let target_id = "audit-target-exists";
+            let mut target = register_native_peer(port, target_id).await;
+
+            // One denial and one acceptance: both must land in the JSONL log.
+            assert_punch_denied(native_exchange(port, punch("")).await);
+            // The audit event is written when hbbs authorizes the request,
+            // independent of whether the target acknowledges the relay hop.
+            native_request_relay_is_not_denied(port, relay_to(target_id, &active)).await;
+
+            // The writer thread flushes per line; give it a moment, then read.
+            let mut jsonl_lines: Vec<String> = Vec::new();
+            for _ in 0..40 {
+                let Ok(entries) = fs::read_dir(&audit_dir) else {
+                    sleep(Duration::from_millis(50)).await;
+                    continue;
+                };
+                jsonl_lines.clear();
+                for entry in entries.flatten() {
+                    let content = fs::read_to_string(entry.path()).unwrap();
+                    jsonl_lines.extend(content.lines().map(|line| line.to_owned()));
+                }
+                let has_denied = jsonl_lines
+                    .iter()
+                    .any(|line| line.contains("\"kind\":\"punch_hole\"") && line.contains("\"verdict\":\"deny\""));
+                let has_allowed = jsonl_lines
+                    .iter()
+                    .any(|line| line.contains("\"kind\":\"request_relay\"") && line.contains("\"verdict\":\"allow\""));
+                if has_denied && has_allowed {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+            let has_denied = jsonl_lines
+                .iter()
+                .any(|line| line.contains("\"kind\":\"punch_hole\"") && line.contains("\"verdict\":\"deny\""));
+            let has_allowed = jsonl_lines
+                .iter()
+                .any(|line| line.contains("\"kind\":\"request_relay\"") && line.contains("\"verdict\":\"allow\""));
+            assert!(has_denied, "denied punch hole must be logged: {jsonl_lines:?}");
+            assert!(has_allowed, "allowed relay request must be logged: {jsonl_lines:?}");
+            for line in &jsonl_lines {
+                // The listener reports IPv4 clients in either dotted or
+                // IPv4-mapped IPv6 form depending on the socket family.
+                assert!(
+                    line.contains("\"client_ip\":\"127.0.0.1\"")
+                        || line.contains("\"client_ip\":\"::ffff:127.0.0.1\""),
+                    "events must record the effective client address: {line}"
+                );
+                assert!(
+                    line.contains("\"mode\":\"enforce\""),
+                    "events must record the effective mode: {line}"
+                );
+            }
         });
 }
 

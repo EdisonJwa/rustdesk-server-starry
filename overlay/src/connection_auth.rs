@@ -28,14 +28,14 @@ static METRICS: AuthMetrics = AuthMetrics::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ConnectionAttemptKind {
+pub enum ConnectionAttemptKind {
     PunchHole,
     RequestRelay,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SignalTransport {
+pub enum SignalTransport {
     UnsupportedUdp,
     Tcp,
     SecureTcp,
@@ -657,6 +657,23 @@ pub(crate) async fn restore(config: Option<&ConnectionAuthConfig>, must_login: b
 }
 
 pub(crate) async fn authorize_connection_attempt(
+    token: &str,
+    kind: ConnectionAttemptKind,
+    transport: SignalTransport,
+    effective_ip: IpAddr,
+) -> AuthDecision {
+    let decision =
+        authorize_connection_attempt_inner(token, kind, transport, effective_ip).await;
+    crate::audit_log::record_decision(
+        kind,
+        transport,
+        &decision,
+        &effective_ip.to_string(),
+    );
+    decision
+}
+
+async fn authorize_connection_attempt_inner(
     token: &str,
     _kind: ConnectionAttemptKind,
     transport: SignalTransport,
