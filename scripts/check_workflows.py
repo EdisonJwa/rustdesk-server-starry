@@ -159,7 +159,7 @@ def main() -> None:
     lockfile = ROOT / "overlay/Cargo.lock"
     assert lockfile.is_file(), "the reviewed Cargo lockfile is missing"
     assert hashlib.sha256(lockfile.read_bytes()).hexdigest() == (
-        "e2b18e27daeaaa61c6fd46e8838bcdb4693aa3ae366826994983b051d7915edb"
+        "b422cda52e3914818c92e5e84984101655476523b727cfb65a932c782c452874"
     ), "the fixed Cargo dependency graph changed without review"
     for dependency_control in (
         'tokio-rusqlite = { version = "0.7", features = ["bundled"] }',

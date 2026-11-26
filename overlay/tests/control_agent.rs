@@ -95,7 +95,7 @@ fn control_agent_enforces_dual_auth_and_atomic_config_transactions() {
             sodiumoxide::init().unwrap();
             let hbbs_port = reserve_hbbs_ports();
             let agent_port = reserve_tcp_port();
-            let root = std::env::temp_dir().join(format!(
+            let root = durable_test_root(&format!(
                 "starry-control-agent-{}-{hbbs_port}-{agent_port}",
                 std::process::id()
             ));
@@ -921,7 +921,7 @@ fn reload_outage_restores_exact_bytes_and_blocks_writes_until_reconciled() {
             sodiumoxide::init().unwrap();
             let hbbs_port = reserve_hbbs_ports();
             let agent_port = reserve_tcp_port();
-            let root = std::env::temp_dir().join(format!(
+            let root = durable_test_root(&format!(
                 "starry-control-agent-recovery-{}-{hbbs_port}-{agent_port}",
                 std::process::id()
             ));
@@ -1513,6 +1513,65 @@ fn reserve_tcp_port() -> u16 {
         .unwrap()
         .port()
 }
+
+/// Returns a scratch root the agent accepts as durable state.
+///
+/// The agent refuses tmpfs and container writable layers by design, and
+/// `std::env::temp_dir()` is tmpfs on many Linux setups (and inside
+/// containers). `STARRY_TEST_ROOT` overrides the location outright; otherwise
+/// the temp dir is kept when it is durable and `$HOME/.starry-test-scratch` is
+/// used when it is not.
+fn durable_test_root(name: &str) -> PathBuf {
+    let base = match std::env::var_os("STARRY_TEST_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None => {
+            let temp = std::env::temp_dir();
+            if durable_filesystem(&temp) {
+                temp
+            } else {
+                std::env::var_os("HOME")
+                    .map(|home| PathBuf::from(home).join(".starry-test-scratch"))
+                    .unwrap_or(temp)
+            }
+        }
+    };
+    let _ = fs::create_dir_all(&base);
+    base.join(name)
+}
+
+/// Reports whether `path` sits on a filesystem the agent treats as durable.
+fn durable_filesystem(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(canonical) = fs::canonicalize(path) else {
+            return false;
+        };
+        let Ok(mountinfo) = fs::read_to_string("/proc/self/mountinfo") else {
+            return false;
+        };
+        let mut best: Option<(usize, &str)> = None;
+        for line in mountinfo.lines() {
+            let Some((left, right)) = line.split_once(" - ") else {
+                continue;
+            };
+            let mountpoint = left.split_whitespace().nth(4).unwrap_or_default();
+            let filesystem = right.split_whitespace().next().unwrap_or_default();
+            let mountpoint_path = Path::new(mountpoint);
+            if canonical.starts_with(mountpoint_path)
+                && best.is_none_or(|(length, _)| mountpoint.len() > length)
+            {
+                best = Some((mountpoint.len(), filesystem));
+            }
+        }
+        !matches!(best.map(|(_, filesystem)| filesystem), Some("overlay" | "tmpfs"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 
 fn reserve_hbbs_ports() -> u16 {
     for port in 30_001..60_000_u16 {

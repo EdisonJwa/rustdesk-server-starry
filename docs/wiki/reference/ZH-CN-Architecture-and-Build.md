@@ -148,6 +148,24 @@ Rust 工具链要求同样适用。Overlay 锚点失败表示需要审查上游�
 生成的 `hbbs` 包含 Starry 修改；`hbbr` 和 `rustdesk-utils` 是从同一 checkout 编译
 的未修改上游源码。
 
+## 上游兼容矩阵
+
+`上游兼容矩阵`（`upstream-matrix.yml`）守护本项目作为 overlay 而非 fork 的
+根本属性：每个锚点都必须经受官方版本之间的迁移。它在推送、拉取请求和每日
+运行，覆盖两个基线：
+
+- **当前正式发布**（与 Release 工作流解析的同一 ref）：overlay 必须连续应用
+  两次且摘要一致，审阅过的 `Cargo.lock` 必须逐字节匹配，打补丁后的源码必须
+  编译、通过全部测试、lint 干净并构建所有二进制；以及
+- **`master`**：overlay 必须连续应用两次且摘要一致，从而在官方打标签之前
+  很早就证明锚点已能携带到下一个正式发布。
+
+`master` 刻意不运行依赖与二进制门禁：审阅过的 `Cargo.lock` 钉在当前正式
+发布上，因此在上游切出下一个标签之前其依赖图与 `master` 不同。矩阵把这一
+差异报告为警告而非失败，因为在 `master` 上真正重要的信号是锚点本身。切出
+新标签时，重新生成 `overlay/Cargo.lock`、更新
+`scripts/check_workflows.py` 中的审阅摘要，正式发布基线便会立即恢复完整门禁。
+
 ## 自动化 Release 门禁
 
 工作流解析官方 ref，并构造 `<upstream>-patch-v<PATCH_VERSION>`。发布前执行：

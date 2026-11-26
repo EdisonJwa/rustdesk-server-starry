@@ -174,6 +174,29 @@ to bypass with a broad search-and-replace.
 The resulting `hbbs` contains Starry changes. `hbbr` keeps upstream session
 forwarding plus the additive public probe/authenticated telemetry surface; `rustdesk-utils` is unchanged.
 
+## Upstream compatibility matrix
+
+`Upstream compatibility matrix` (`upstream-matrix.yml`) guards the property
+that makes this project an overlay instead of a fork: every anchor must
+survive the move between official releases. It runs on pushes, pull requests,
+and daily, and covers two bases:
+
+- the **current formal release** (the same ref the release workflow resolves);
+  the overlay must apply twice with an identical digest, the reviewed
+  `Cargo.lock` must match exactly, and the patched tree must compile, pass the
+  full test suite, lint clean, and build every binary; and
+- **`master`**: the overlay must apply twice with an identical digest, which
+  proves the anchors already carry forward to the next official release long
+  before it is tagged.
+
+`master` deliberately does not run the dependency or binary gates: the reviewed
+`Cargo.lock` is pinned to the current formal release, so its graph differs from
+`master` until upstream cuts the next tag. The matrix reports that difference as
+a warning instead of failing, because the anchors are the signal that matters
+there. When a tag is cut, regenerate `overlay/Cargo.lock`, update the reviewed
+digest in `scripts/check_workflows.py`, and the release base immediately regains
+the full gate.
+
 ## Automated release gates
 
 The workflow resolves the official ref and constructs
