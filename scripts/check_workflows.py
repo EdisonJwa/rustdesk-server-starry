@@ -159,8 +159,11 @@ def main() -> None:
         )
     lockfile = ROOT / "Cargo.lock"
     assert lockfile.is_file(), "the reviewed Cargo lockfile is missing"
-    assert hashlib.sha256(lockfile.read_bytes()).hexdigest() == (
-        "30421b4a3b6a8da72521d547aa9acfd2e50a98ef90f72ee71a2e533d0bac256a"
+    # Hash the logical content: a Windows checkout may hold CRLF even though
+    # the committed blob is LF, and that must not fail the gate.
+    lock_text = lockfile.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(lock_text).hexdigest() == (
+        "e1cd2147d6ec0766c56a6b92514e9ba9505e7905730bd51f51a9ca072760f612"
     ), "the fixed Cargo dependency graph changed without review"
     vendored = (ROOT / "libs/hbb_common.VENDORED").read_text(encoding="utf-8")
     assert re.search(r"(?m)^# commit:  [0-9a-f]{40} ", vendored), (

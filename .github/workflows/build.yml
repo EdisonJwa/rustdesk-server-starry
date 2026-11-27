@@ -215,6 +215,9 @@ jobs:
       - name: Validate immutable workflow inputs
         run: python3 scripts/check_workflows.py
 
+      - name: Validate address book access rules
+        run: python3 scripts/check_sources.py
+
       - name: Assemble the server source from tracked files
         id: upstream
         run: |
@@ -369,6 +372,10 @@ jobs:
             _server/src/control_agent/config_store.rs \
             _server/src/control_agent/local_client.rs \
             _server/src/control_agent/relay_enrollment.rs \
+            _server/src/auth_server.rs \
+            _server/src/bin/starry-api.rs \
+            _server/src/bin/starry-audit-export.rs \
+            _server/src/bin/starry-client-config.rs \
             _server/src/bin/starry-control-agent.rs \
             _server/src/bin/starry-relayctl.rs \
             _server/src/config_downgrade.rs \
@@ -508,7 +515,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir artifact
-          for binary in hbbs hbbr rustdesk-utils starry-control-agent starry-relayctl; do
+          for binary in hbbs hbbr rustdesk-utils starry-control-agent starry-relayctl \
+            starry-audit-export starry-client-config starry-api; do
             install -m 0755 "_server/target/${TARGET}/release/${binary}" \
               "artifact/${binary}-${RELEASE_TAG}-linux-${ARCH}"
           done
@@ -516,6 +524,7 @@ jobs:
             --owner=0 --group=0 --numeric-owner \
             -C "_server/target/${TARGET}/release" -cf - \
             hbbs hbbr rustdesk-utils starry-control-agent starry-relayctl \
+            starry-audit-export starry-client-config starry-api \
             | gzip -n > \
               "artifact/rustdesk-server-starry-${RELEASE_TAG}-linux-${ARCH}.tar.gz"
 
@@ -847,6 +856,11 @@ jobs:
             install -m 0755 \
               "_artifacts/linux-${arch}/starry-relayctl-${RELEASE_TAG}-linux-${arch}" \
               "candidate/docker/${arch}/starry-relayctl"
+            for tool in starry-audit-export starry-client-config starry-api; do
+              install -m 0755 \
+                "_artifacts/linux-${arch}/${tool}-${RELEASE_TAG}-linux-${arch}" \
+                "candidate/docker/${arch}/${tool}"
+            done
           done
           cp _artifacts/linux-amd64/* candidate/release-assets/
           cp _artifacts/deb/* candidate/release-assets/
