@@ -317,11 +317,11 @@ pub(crate) fn update_native_online(relays: &[String]) {
 pub(crate) fn snapshot() -> RelayRuntimeSnapshot {
     let active = starry_config::active_snapshot();
     let pool = POOL.read().map(|pool| pool.clone()).unwrap_or_default();
-    let max_telemetry_age_seconds = active
-        .config
-        .as_ref()
-        .map(|config| config.relay_quality.max_telemetry_age_seconds)
-        .unwrap_or_else(|| starry_config::RelayQualityConfig::default().max_telemetry_age_seconds);
+    // Freshness is a generic telemetry property read through the config module,
+    // not a field of the relay-quality extension; see
+    // docs/reference/ADR-AKARI-ARCHIVE.md step 1.
+    let max_telemetry_age_seconds =
+        starry_config::max_telemetry_age_seconds_from(active.config.as_deref());
     let health = websocket_signal::health_runtime_snapshot(max_telemetry_age_seconds);
     let geo = geo_relay::runtime_snapshot();
     build_snapshot(active, pool, health, geo)
@@ -340,8 +340,9 @@ pub(crate) fn fast_media_endpoint(relay: &str) -> Option<FastMediaRelayEndpoint>
         .iter()
         .find(|endpoint| endpoint.relay.eq_ignore_ascii_case(relay))?;
     let configured_port = configured.fast_media_udp_port?;
-    let health =
-        websocket_signal::health_runtime_snapshot(config.relay_quality.max_telemetry_age_seconds);
+    let health = websocket_signal::health_runtime_snapshot(
+        starry_config::max_telemetry_age_seconds_from(Some(config.as_ref())),
+    );
     if !health.is_ready() {
         return None;
     }

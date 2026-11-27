@@ -89,14 +89,32 @@ fn validate_relay_response(uuid: &str, relay_server: &str) -> Result<(), &'stati
 }
 
 /// Whether the server, not the controller, owns the relay address in a
-/// `RequestRelay`. A blank controller value always defers to the server: the
-/// documented client setup leaves the relay field empty and relies on the
-/// server handing out one. Without this the peer would be asked to dial a
-/// relay with no address and would hang until its connection deadline.
-/// Enabling fast_relay additionally lets the server override a value the
-/// controller did supply.
-fn server_selects_relay(client_relay: &str, fast_relay_enabled: bool) -> bool {
-    client_relay.is_empty() || fast_relay_enabled
+/// `RequestRelay`.
+///
+/// Two independent reasons, deliberately not merged into one flag:
+///
+/// * A blank controller value always defers to the server. The documented client
+///   setup leaves the relay field empty and relies on the server handing out an
+///   address; without this the peer would be asked to dial a relay with no
+///   address and would hang until its connection deadline.
+/// * A deployment that wants server-chosen relays outright can also override a
+///   value the controller did supply.
+///
+/// The override reason is read from configuration here rather than from
+/// `fast_relay` so that archiving the extension does not silently change relay
+/// selection — see docs/reference/ADR-AKARI-ARCHIVE.md step 3.
+fn server_selects_relay(client_relay: &str, server_chooses_relay: bool) -> bool {
+    client_relay.is_empty() || server_chooses_relay
+}
+
+/// Whether this deployment lets the server override a controller-supplied relay.
+///
+/// Today the only source is `fast_mode.relay.fast_compat_enabled`, because a
+/// server-selected relay is only actionable for controllers that understand the
+/// signed authorization that accompanies it. When that extension is archived this
+/// can become a plain config bit without touching `server_selects_relay`.
+fn server_chooses_relay() -> bool {
+    fast_relay::enabled()
 }
 
 // An online query for about 5000 ids is the largest message a client sends here.
@@ -1307,7 +1325,7 @@ impl RendezvousServer {
                         //
                         // When fast_relay is enabled the server owns the choice
                         // outright, so it also overrides a client-supplied relay.
-                        if server_selects_relay(&rf.relay_server, fast_relay::enabled()) {
+                        if server_selects_relay(&rf.relay_server, server_chooses_relay()) {
                             if let Some(selected) = server_selected_relay.as_ref() {
                                 rf.relay_server = selected.clone();
                             }
@@ -3473,8 +3491,8 @@ mod tests {
     fn server_fills_a_blank_client_relay_even_with_fast_relay_off() {
         assert!(server_selects_relay("", false));
         assert!(server_selects_relay("", true));
-        // A relay the client did choose survives unless the server owns the
-        // decision outright.
+        // A relay the client did choose survives unless the deployment lets the
+        // server override it.
         assert!(!server_selects_relay("relay.example.test:21117", false));
         assert!(server_selects_relay("relay.example.test:21117", true));
     }

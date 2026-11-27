@@ -15,6 +15,7 @@ mod rendezvous_server;
 mod secure_tcp;
 pub mod strategy;
 mod starry_config;
+mod telemetry;
 mod webrtc_signal;
 mod websocket_signal;
 pub use rendezvous_server::*;

@@ -645,6 +645,24 @@ pub fn snapshot() -> Option<Arc<StarryConfig>> {
     STATE.read().ok()?.config.clone()
 }
 
+/// How old a relay's authenticated telemetry may be before it counts as stale.
+///
+/// The value is still read from `relay_quality.max_telemetry_age_seconds`, so no
+/// operator has to change a document, but the accessor lives here rather than in
+/// the relay-quality extension: relay health and the relay pool's readiness are
+/// generic features, and they must not stop working when that extension is
+/// archived. See docs/reference/ADR-AKARI-ARCHIVE.md step 1.
+pub fn max_telemetry_age_seconds() -> u64 {
+    max_telemetry_age_seconds_from(snapshot().as_deref())
+}
+
+/// Same as [`max_telemetry_age_seconds`] for callers already holding a snapshot.
+pub fn max_telemetry_age_seconds_from(config: Option<&StarryConfig>) -> u64 {
+    config
+        .map(|config| config.relay_quality.max_telemetry_age_seconds)
+        .unwrap_or(crate::telemetry::DEFAULT_MAX_AGE_SECONDS)
+}
+
 pub fn active_snapshot() -> ActiveConfigSnapshot {
     match STATE.read() {
         Ok(state) => ActiveConfigSnapshot {

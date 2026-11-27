@@ -983,11 +983,9 @@ pub(crate) fn snapshots() -> Vec<HealthSnapshot> {
     };
     let now = now_millis();
     let unix_now = unix_millis();
-    let max_telemetry_age_seconds = crate::starry_config::snapshot()
-        .map(|config| config.relay_quality.max_telemetry_age_seconds)
-        .unwrap_or_else(|| {
-            crate::starry_config::RelayQualityConfig::default().max_telemetry_age_seconds
-        });
+    // Read through the config module so this does not depend on the
+    // relay-quality extension; see docs/reference/ADR-AKARI-ARCHIVE.md step 1.
+    let max_telemetry_age_seconds = crate::starry_config::max_telemetry_age_seconds();
     state
         .config
         .endpoints

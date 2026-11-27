@@ -18,7 +18,9 @@ use std::{
 };
 
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
-pub(crate) const TELEMETRY_SCHEMA_VERSION: u32 = 2;
+// The authenticated telemetry schema now lives in `crate::telemetry`: HBBR's
+// report version is a property of relay telemetry, not of this optional UDP data
+// plane. See docs/reference/ADR-AKARI-ARCHIVE.md step 2.
 const AKR_HEADER_BYTES: usize = 32;
 const HELLO_COOKIE_BYTES: usize = 56;
 const BIND_PREFIX_BYTES: usize = 58;
