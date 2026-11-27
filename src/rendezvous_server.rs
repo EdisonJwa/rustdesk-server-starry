@@ -88,6 +88,17 @@ fn validate_relay_response(uuid: &str, relay_server: &str) -> Result<(), &'stati
     validate_relay_uuid(uuid)
 }
 
+/// Whether the server, not the controller, owns the relay address in a
+/// `RequestRelay`. A blank controller value always defers to the server: the
+/// documented client setup leaves the relay field empty and relies on the
+/// server handing out one. Without this the peer would be asked to dial a
+/// relay with no address and would hang until its connection deadline.
+/// Enabling fast_relay additionally lets the server override a value the
+/// controller did supply.
+fn server_selects_relay(client_relay: &str, fast_relay_enabled: bool) -> bool {
+    client_relay.is_empty() || fast_relay_enabled
+}
+
 // An online query for about 5000 ids is the largest message a client sends here.
 const DEFAULT_MAX_MESSAGE_KB: usize = 64;
 // A knob that can be turned to unbounded is not a bound.
@@ -1262,9 +1273,19 @@ impl RendezvousServer {
                         relay_quality::RequestResolution::Pending
                         | relay_quality::RequestResolution::Blocked => return true,
                     };
-                    if quality_selection.is_none() && fast_relay::enabled() {
-                        if let Some(selected) = server_selected_relay.as_ref() {
-                            rf.relay_server = selected.clone();
+                    if quality_selection.is_none() {
+                        // The relay the peer must dial is a server decision whenever
+                        // the controller left it blank. This is not tied to
+                        // fast_relay: a client configured with an empty relay field
+                        // (the documented setup) would otherwise be told to request
+                        // a relay with no address and hang until its deadline.
+                        //
+                        // When fast_relay is enabled the server owns the choice
+                        // outright, so it also overrides a client-supplied relay.
+                        if server_selects_relay(&rf.relay_server, fast_relay::enabled()) {
+                            if let Some(selected) = server_selected_relay.as_ref() {
+                                rf.relay_server = selected.clone();
+                            }
                         }
                     }
                     let fast_media_endpoint =
@@ -3416,6 +3437,21 @@ mod tests {
         });
         let len = msg.write_to_bytes().unwrap().len();
         assert!(len <= DEFAULT_MAX_MESSAGE_KB << 10, "{len}");
+    }
+
+    /// A client that leaves its relay field empty is the documented setup: the
+    /// server must fill the address in. Regression: this used to depend on
+    /// fast_relay, so with fast_relay off (the production default) the peer was
+    /// handed a RequestRelay with no relay address and every connection failed
+    /// with "deadline has elapsed".
+    #[test]
+    fn server_fills_a_blank_client_relay_even_with_fast_relay_off() {
+        assert!(server_selects_relay("", false));
+        assert!(server_selects_relay("", true));
+        // A relay the client did choose survives unless the server owns the
+        // decision outright.
+        assert!(!server_selects_relay("relay.example.test:21117", false));
+        assert!(server_selects_relay("relay.example.test:21117", true));
     }
 
     #[test]
