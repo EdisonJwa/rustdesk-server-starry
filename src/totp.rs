@@ -248,7 +248,7 @@ pub fn read_challenge_for(secret: &str, expected_user: i64, now_seconds: u64) ->
         .unwrap_or(false)
 }
 
-pub fn read_challenge(secret: &str, now_seconds: u64) -> Option<Challenge> {
+fn read_challenge(secret: &str, now_seconds: u64) -> Option<Challenge> {
     let raw = base64::decode_config(secret, base64::URL_SAFE_NO_PAD).ok()?;
     let challenge: Challenge = serde_json::from_slice(&raw).ok()?;
     if challenge.expires_at <= now_seconds {

@@ -1,6 +1,6 @@
 # 开发计划表 — 基于官方客户端代码分析
 
-状态：计划（2026-11-28）
+状态：**已实现**（2026-11-28）—— 见进度列
 依据：[客户端代码分析](CLIENT-GAP-ANALYSIS.zh-CN.md)（rustdesk @ `104ef2a`）
 
 [English](DEVELOPMENT-PLAN.md) | 简体中文
@@ -15,20 +15,24 @@
 
 ## 一、总览
 
-| # | 阶段 | 端点 / 范围 | 优先级 | 工作量 | 依赖 |
-| --- | --- | --- | --- | --- | --- |
-| P0-1 | 心跳与策略下发 | `/api/heartbeat`, `/api/sysinfo`, `/api/sysinfo_ver` | P0 | L | 安全边界先定 |
-| P0-2 | 非 legacy 地址簿 | 10 个 `/api/ab/*` 端点 | P0 | L | O2 表结构 |
-| P0-3 | 设备组与用户 | `/api/device-group/accessible`, `/api/users`, `/api/peers` | P0 | M | P0-2 的 peer 表 |
-| P1-1 | 设备自助上线 | `/api/devices/deploy`, `/api/devices/cli` | P1 | M | 认证（已有） |
-| P1-2 | TOTP 两步验证 | `/api/login` 的 `tfa_type`/`secret` | P1 | M | 无 |
-| P1-3 | 地址簿冲突语义 | `/api/ab` ETag / 409 | P1 | S | 无 |
-| P2-1 | 客户端审计上传 | `/api/audit/{typ}`, `PUT /api/audit` | P2 | M | 治理方案 |
-| P2-2 | 受限网络 API 代理 | `HttpProxyRequest` | P2 | M | 白名单设计 |
-| P2-3 | 会话录像 | `/api/record` | P2 | L | **治理方案必须先定** |
-| P3-1 | 会话保活 | `HealthCheck` | P3 | S | 实测确认有收益 |
-| P3-2 | LAN 发现 | `PeerDiscovery` | P3 | S | 无 |
-| P3-3 | 设备切换授权 | `/api/switch-grant` | P3 | M | 设备身份层设计 |
+| # | 阶段 | 端点 / 范围 | 优先级 | 状态 |
+| --- | --- | --- | --- | --- |
+| P0-1 | 心跳与策略下发 | `/api/heartbeat`、`/api/sysinfo`、`/api/sysinfo_ver` | P0 | **已完成。** 按要求先写白名单与安全边界 |
+| P0-2 | 非 legacy 地址簿 | 12 个 `/api/ab/*` 端点 | P0 | **已完成。** peer 表拆分随端点一起落地，只迁移一次 |
+| P0-3 | 设备组与用户 | `/api/device-group/accessible`、`/api/users`、`/api/peers` | P0 | **已完成。** `/api/peers` 返回空页：注册表在 rendezvous 库里 |
+| P1-1 | 设备自助上线 | `/api/devices/deploy` | P1 | **已完成。** 令牌签发走 `/api/admin/enrolment-token` |
+| P1-2 | TOTP 两步验证 | `/api/login` 的 `tfa_type` / `secret` | P1 | **已完成。** 两步，验证码一次性 |
+| P1-3 | 地址簿冲突语义 | `/api/ab` 的 ETag / 409 | P1 | **未开始。** legacy `/api/ab` 未改；结构化形态有自己的写入路径 |
+| P2-1 | 客户端审计上传 | `/api/audit/{typ}`、`PUT /api/audit` | P2 | **已完成，需显式开启。** 独立表，仅供参考 |
+| P2-2 | 受限网络 API 代理 | `HttpProxyRequest` | P2 | **部分。** 白名单与测试已就位；请求尚未接到 HTTP 客户端 |
+| P2-3 | 会话录像 | `/api/record` | P2 | **部分。** 端点与记账在开关之后；只统计字节，不存内容 |
+| P3-1 | 会话保活 | `HealthCheck` | P3 | **已完成。** 在监听器里回空帧 |
+| P3-2 | LAN 发现 | `PeerDiscovery` | P3 | **服务端无需实现。** 对端之间多播 |
+| P3-3 | 设备切换授权 | `/api/switch-grant` | P3 | **未开始。** 需先设计设备身份层 |
+
+标为已完成的每一项都有单测；有线上契约的另有 `tests/api_endpoints.rs` 中的 e2e；
+并以变异验证过门禁确实能抓住回退。端点参考见
+[客户端 API 端点](CLIENT-API-ENDPOINTS.zh-CN.md)。
 
 ## 二、P0-1　心跳与策略下发
 
@@ -154,7 +158,7 @@ resp: {sysinfo?, disconnect?, strategy?, modified_at?}
 | 文档双语 | 每项都有 `docs/reference/*.md` 与 `.zh-CN.md`，`check_docs.py` 把关 |
 | 字典 | 新增端点全部登记到客户端契约文档，避免下次分析重做 |
 
-## 十、建议执行顺序与里程碑
+## 十、建议执行顺序与里程碑（已作废）
 
 ```
 M1（1 周）  P1-3 冲突语义  →  O2 表结构拆分  →  P0-2 地址簿（前半）

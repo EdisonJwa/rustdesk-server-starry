@@ -138,7 +138,7 @@ pub(crate) fn sanitise_strategy(document: &str) -> Option<(String, i64)> {
 /// not logged in sends only its identity.
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
-pub struct HeartbeatRequest {
+pub(crate) struct HeartbeatRequest {
     pub id: String,
     pub uuid: String,
     pub ver: String,
@@ -155,7 +155,7 @@ pub struct HeartbeatRequest {
 /// The heartbeat answer. Absent members are omitted, not null, so the client's
 /// `rsp.remove(...)` checks stay false.
 #[derive(Clone, Debug, Serialize, Default, PartialEq, Eq)]
-pub struct HeartbeatResponse {
+pub(crate) struct HeartbeatResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sysinfo: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,7 +186,7 @@ async fn read_body(body: RawBody<axum::body::Body>) -> Option<HeartbeatRequest> 
 // ---------------------------------------------------------------------------
 
 /// `POST /api/heartbeat`
-pub async fn heartbeat(
+pub(crate) async fn heartbeat(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<axum::body::Body>,
@@ -298,7 +298,7 @@ pub(crate) fn build_strategy_document(document: &str) -> Option<Value> {
 ///
 /// The client treats `SYSINFO_UPDATED` and `ID_NOT_FOUND` specially: the former
 /// means "stop re-uploading", the latter triggers a retry.
-pub async fn sysinfo(
+pub(crate) async fn sysinfo(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<axum::body::Body>,
@@ -337,7 +337,7 @@ pub async fn sysinfo(
 }
 
 /// `POST /api/sysinfo_ver` — lets the client skip an unchanged upload.
-pub async fn sysinfo_version(
+pub(crate) async fn sysinfo_version(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<axum::body::Body>,

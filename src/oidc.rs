@@ -64,7 +64,7 @@ const LEEWAY_SECONDS: u64 = 60;
 /// and because an operator tool that prints the effective configuration must
 /// not have to restate the field list.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Provider {
+pub(crate) struct Provider {
     /// What the client is told this provider is called. Appears in the request
     /// as `op`, and in the `oidc/<name>` login-options form, so it must be a
     /// simple slug.
@@ -98,7 +98,7 @@ pub struct Provider {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
-pub struct OidcConfigDocument {
+pub(crate) struct OidcConfigDocument {
     #[serde(default)]
     pub providers: Vec<Provider>,
     /// Lifetime of one pending login code.
@@ -107,7 +107,7 @@ pub struct OidcConfigDocument {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct OidcConfig {
+pub(crate) struct OidcConfig {
     pub providers: Vec<Provider>,
     pub request_ttl: Duration,
 }
@@ -268,7 +268,7 @@ impl Provider {
 
 /// The parts of an OIDC discovery document this server uses.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct Discovery {
+pub(crate) struct Discovery {
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -277,7 +277,7 @@ pub struct Discovery {
 
 /// JWK fields needed to build a verification key.
 #[derive(Clone, Debug, Deserialize)]
-pub struct Jwk {
+pub(crate) struct Jwk {
     #[serde(default)]
     kid: Option<String>,
     kty: String,
@@ -300,7 +300,7 @@ pub struct Jwk {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct Jwks {
+pub(crate) struct Jwks {
     keys: Vec<Jwk>,
 }
 
@@ -309,7 +309,7 @@ pub struct Jwks {
 /// `aud` is deserialised loosely because a single-audience token carries a
 /// string while a multi-audience token carries an array, and both are legal.
 #[derive(Clone, Debug, Deserialize)]
-pub struct IdTokenClaims {
+pub(crate) struct IdTokenClaims {
     pub iss: String,
     pub sub: String,
     #[serde(default)]
@@ -392,7 +392,7 @@ impl IdTokenClaims {
 /// Why an id_token was refused. Separate from a plain string so callers can log
 /// a stable reason without leaking claim contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TokenRejection {
+pub(crate) enum TokenRejection {
     IssuerMismatch,
     AudienceMismatch,
     Expired,
@@ -425,7 +425,7 @@ impl TokenRejection {
 /// Kept separate from signature checking so the policy is testable without
 /// minting keys: every branch here is a pure function of the claims, the
 /// provider and the expected nonce.
-pub fn validate_claims(
+pub(crate) fn validate_claims(
     claims: &IdTokenClaims,
     provider: &Provider,
     expected_nonce: &str,
@@ -485,7 +485,7 @@ pub fn validate_claims(
 }
 
 /// Verifies an id_token's signature against the provider's JWKS.
-pub fn verify_signature(
+pub(crate) fn verify_signature(
     token: &str,
     provider: &Provider,
     jwks: &Jwks,
@@ -562,7 +562,7 @@ fn select_key(
 
 /// State of one in-flight browser half.
 #[derive(Clone, Debug)]
-pub enum PendingState {
+pub(crate) enum PendingState {
     /// Waiting for the IdP to redirect the browser back.
     Waiting,
     /// The callback arrived, the id_token verified, and the client has not yet
@@ -571,7 +571,7 @@ pub enum PendingState {
 }
 
 #[derive(Clone, Debug)]
-pub struct CompletedLogin {
+pub(crate) struct CompletedLogin {
     pub username: String,
     pub subject: String,
     pub email: Option<String>,
@@ -580,7 +580,7 @@ pub struct CompletedLogin {
 }
 
 #[derive(Clone, Debug)]
-pub struct PendingLogin {
+pub(crate) struct PendingLogin {
     pub provider: String,
     pub nonce: String,
     pub state_parameter: String,
@@ -599,13 +599,13 @@ pub struct PendingLogin {
 /// which is correct — the client is polling every second and will surface the
 /// failure rather than being handed a stale login minutes later.
 #[derive(Default)]
-pub struct PendingLogins {
+pub(crate) struct PendingLogins {
     entries: Mutex<HashMap<String, PendingLogin>>,
 }
 
 /// Why a pending login could not be found or used.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PendingError {
+pub(crate) enum PendingError {
     Unknown,
     Expired,
     /// A second callback tried to complete a login that is already completed.
@@ -749,7 +749,7 @@ impl PendingLogins {
 // ---------------------------------------------------------------------------
 
 /// Runtime state for OIDC, shared through the API state.
-pub struct OidcRuntime {
+pub(crate) struct OidcRuntime {
     pub config: OidcConfig,
     pub pending: PendingLogins,
     /// Cached discovery documents, keyed by provider name.
@@ -856,7 +856,7 @@ impl OidcRuntime {
 /// Token-endpoint exchange, split out because it is the one place a client
 /// secret is used and the only network call that must not be retried blindly.
 #[derive(Debug, Deserialize)]
-pub struct TokenResponse {
+pub(crate) struct TokenResponse {
     #[serde(default)]
     pub id_token: Option<String>,
 }
@@ -865,7 +865,7 @@ pub struct TokenResponse {
 ///
 /// PKCE is always used (`S256`), so the code cannot be redeemed by anything
 /// that only observes the redirect. The verifier stays in the pending entry.
-pub fn authorization_url(
+pub(crate) fn authorization_url(
     document: &Discovery,
     provider: &Provider,
     state: &str,
@@ -887,14 +887,14 @@ pub fn authorization_url(
 }
 
 /// PKCE `code_challenge` for a verifier: base64url(sha256(verifier)).
-pub fn code_challenge(verifier: &str) -> String {
+pub(crate) fn code_challenge(verifier: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(verifier.as_bytes());
     encode_config(digest, base64::URL_SAFE_NO_PAD)
 }
 
 /// A random URL-safe token for `state`, `nonce` and PKCE verifiers.
-pub fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     encode_config(uuid::Uuid::new_v4().as_bytes(), base64::URL_SAFE_NO_PAD)
 }
 

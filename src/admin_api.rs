@@ -74,7 +74,7 @@ struct StrategyWrite {
 /// unfiltered document would make the filter the only guard at delivery time;
 /// filtering here as well means a document that was rejected is visibly not
 /// stored, which is easier to explain to an operator.
-pub async fn set_client_strategy(
+pub(crate) async fn set_client_strategy(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<Body>,
@@ -123,7 +123,7 @@ pub async fn set_client_strategy(
 }
 
 /// `GET /api/admin/client-strategy` — what would currently be delivered.
-pub async fn get_client_strategy(
+pub(crate) async fn get_client_strategy(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -157,7 +157,7 @@ struct TotpEnrolRequest {
 /// Returns the secret so an operator can hand it to the user, or the newly
 /// generated one. There is no endpoint to read an existing secret back: enrolling
 /// again replaces it, which is the reset path.
-pub async fn enrol_totp(
+pub(crate) async fn enrol_totp(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<Body>,
@@ -202,7 +202,7 @@ pub async fn enrol_totp(
 }
 
 /// `DELETE /api/admin/totp` — remove a second factor.
-pub async fn disable_totp(
+pub(crate) async fn disable_totp(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -220,7 +220,7 @@ pub async fn disable_totp(
 }
 
 /// `POST /api/admin/enrolment-token` — mint a one-time device token.
-pub async fn issue_enrolment_token(
+pub(crate) async fn issue_enrolment_token(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -240,7 +240,7 @@ pub async fn issue_enrolment_token(
 }
 
 /// `POST /api/admin/disconnect/{peer_id}` — queue a session teardown.
-pub async fn disconnect(
+pub(crate) async fn disconnect(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(peer_id): AxumPath<String>,
     headers: HeaderMap,

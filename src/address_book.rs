@@ -41,7 +41,7 @@ use crate::auth_server::{ApiState, AuthFailure};
 /// stores it but only enforces read-versus-write on the endpoints below; richer
 /// semantics belong to a later permission model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BookProfile {
+pub(crate) struct BookProfile {
     pub guid: String,
     pub name: String,
     pub owner: String,
@@ -59,7 +59,7 @@ pub struct BookProfile {
 /// politeness: a mismatch here breaks every push.
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
-pub struct BookPeer {
+pub(crate) struct BookPeer {
     pub id: String,
     pub hash: String,
     pub password: String,
@@ -86,7 +86,7 @@ pub struct BookPeer {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BookTag {
+pub(crate) struct BookTag {
     pub name: String,
     /// Client ARGB value. The client sends an unsigned 32-bit int (Dart has no
     /// signed widths), so this accepts the whole range and stores it as i64.
@@ -123,7 +123,7 @@ impl Page {
 /// A book is visible when the caller owns it or its `rule` grants access. v1
 /// models sharing as "rule >= read", which matches what the client can express;
 /// per-user sharing lists are a later concern.
-pub async fn books_for(state: &ApiState, user_id: i64) -> Result<Vec<BookProfile>, String> {
+pub(crate) async fn books_for(state: &ApiState, user_id: i64) -> Result<Vec<BookProfile>, String> {
     let owner = state.user_name(user_id).await?;
     state
         .db_call(move |connection| {
@@ -153,7 +153,7 @@ pub async fn books_for(state: &ApiState, user_id: i64) -> Result<Vec<BookProfile
 ///
 /// This is the endpoint that decides legacy versus structured mode, so it must
 /// be idempotent and cheap: the client calls it on every pull.
-pub async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Result<String, String> {
+pub(crate) async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Result<String, String> {
     let name = state.user_name(user_id).await?;
     state
         .db_call(move |connection| {
@@ -180,7 +180,7 @@ pub async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Result<Stri
 }
 
 /// Whether the caller may write to a book. `rule` of 1 is read-only.
-pub async fn may_write(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, String> {
+pub(crate) async fn may_write(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -196,7 +196,7 @@ pub async fn may_write(state: &ApiState, user_id: i64, guid: &str) -> Result<boo
         .await
 }
 
-pub async fn peers_in_book(
+pub(crate) async fn peers_in_book(
     state: &ApiState,
     user_id: i64,
     guid: &str,
@@ -268,7 +268,7 @@ async fn may_read(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, St
         .await
 }
 
-pub async fn tags_in_book(state: &ApiState, user_id: i64, guid: &str) -> Result<Vec<BookTag>, String> {
+pub(crate) async fn tags_in_book(state: &ApiState, user_id: i64, guid: &str) -> Result<Vec<BookTag>, String> {
     if !may_read(state, user_id, guid).await? {
         return Err("book_not_found".to_owned());
     }
@@ -291,7 +291,7 @@ pub async fn tags_in_book(state: &ApiState, user_id: i64, guid: &str) -> Result<
 }
 
 /// Inserts or replaces a peer row.
-pub async fn upsert_peer(
+pub(crate) async fn upsert_peer(
     state: &ApiState,
     guid: &str,
     peer: BookPeer,
@@ -343,7 +343,7 @@ pub async fn upsert_peer(
 }
 
 /// Deletes the named peers from a book and reports how many existed.
-pub async fn delete_peers(state: &ApiState, guid: &str, ids: Vec<String>) -> Result<u64, String> {
+pub(crate) async fn delete_peers(state: &ApiState, guid: &str, ids: Vec<String>) -> Result<u64, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -359,7 +359,7 @@ pub async fn delete_peers(state: &ApiState, guid: &str, ids: Vec<String>) -> Res
         .await
 }
 
-pub async fn upsert_tag(state: &ApiState, guid: &str, tag: BookTag) -> Result<(), String> {
+pub(crate) async fn upsert_tag(state: &ApiState, guid: &str, tag: BookTag) -> Result<(), String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -377,7 +377,7 @@ pub async fn upsert_tag(state: &ApiState, guid: &str, tag: BookTag) -> Result<()
 ///
 /// The client sends the old and new name and expects the peers to follow, so
 /// doing this in one statement set here is what keeps the book consistent.
-pub async fn rename_tag(state: &ApiState, guid: &str, old: &str, new: &str) -> Result<(), String> {
+pub(crate) async fn rename_tag(state: &ApiState, guid: &str, old: &str, new: &str) -> Result<(), String> {
     let guid = guid.to_owned();
     let old = old.to_owned();
     let new = new.to_owned();
@@ -419,7 +419,7 @@ pub async fn rename_tag(state: &ApiState, guid: &str, old: &str, new: &str) -> R
         .await
 }
 
-pub async fn delete_tags(state: &ApiState, guid: &str, names: Vec<String>) -> Result<u64, String> {
+pub(crate) async fn delete_tags(state: &ApiState, guid: &str, names: Vec<String>) -> Result<u64, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -486,7 +486,7 @@ fn book_error(code: &str) -> Response {
     crate::auth_server::api_error(StatusCode::NOT_FOUND, code)
 }
 
-pub async fn personal(
+pub(crate) async fn personal(
     Extension(state): Extension<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     body: RawBody<Body>,
@@ -505,7 +505,7 @@ pub async fn personal(
     }
 }
 
-pub async fn settings(
+pub(crate) async fn settings(
     Extension(state): Extension<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     body: RawBody<Body>,
@@ -519,7 +519,7 @@ pub async fn settings(
     Json(json!({"max_peer_one_ab": 1_000_000})).into_response()
 }
 
-pub async fn shared_profiles(
+pub(crate) async fn shared_profiles(
     Extension(state): Extension<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Query(page): Query<Page>,
@@ -549,7 +549,7 @@ pub async fn shared_profiles(
     Json(json!({"total": total, "data": data})).into_response()
 }
 
-pub async fn peers(
+pub(crate) async fn peers(
     Extension(state): Extension<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Query(page): Query<Page>,
@@ -585,7 +585,7 @@ pub async fn peers(
     }
 }
 
-pub async fn tags(
+pub(crate) async fn tags(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -607,7 +607,7 @@ pub async fn tags(
     }
 }
 
-pub async fn peer_add(
+pub(crate) async fn peer_add(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -656,7 +656,7 @@ struct PeerUpdate {
     password: Option<String>,
 }
 
-pub async fn peer_update(
+pub(crate) async fn peer_update(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -729,7 +729,7 @@ pub async fn peer_update(
     }
 }
 
-pub async fn peer_delete(
+pub(crate) async fn peer_delete(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -760,7 +760,7 @@ pub async fn peer_delete(
     }
 }
 
-pub async fn tag_add(
+pub(crate) async fn tag_add(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -800,7 +800,7 @@ struct TagRename {
     new: String,
 }
 
-pub async fn tag_rename(
+pub(crate) async fn tag_rename(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -833,7 +833,7 @@ pub async fn tag_rename(
     }
 }
 
-pub async fn tag_update(
+pub(crate) async fn tag_update(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,
@@ -863,7 +863,7 @@ pub async fn tag_update(
     }
 }
 
-pub async fn tag_delete(
+pub(crate) async fn tag_delete(
     Extension(state): Extension<Arc<ApiState>>,
     AxumPath(guid): AxumPath<String>,
     headers: axum::http::HeaderMap,

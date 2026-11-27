@@ -75,7 +75,7 @@ fn feature_disabled() -> Response {
 /// `POST /api/audit/{typ}`
 ///
 /// Stored with its source marked `client`, never mixed with server audit.
-pub async fn audit_upload(
+pub(crate) async fn audit_upload(
     Extension(state): Extension<Arc<ApiState>>,
     axum::extract::Path(kind): axum::extract::Path<String>,
     headers: HeaderMap,
@@ -129,7 +129,7 @@ struct AuditNote {
 }
 
 /// `PUT /api/audit` — attach a note to one session.
-pub async fn audit_note(
+pub(crate) async fn audit_note(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<axum::body::Body>,
@@ -184,7 +184,7 @@ pub async fn audit_note(
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
-pub struct RecordQuery {
+pub(crate) struct RecordQuery {
     /// `new` starts a file, `frame` appends a chunk.
     #[serde(rename = "type")]
     pub kind: String,
@@ -193,7 +193,7 @@ pub struct RecordQuery {
 }
 
 /// `POST /api/record` — session recording chunks.
-pub async fn record(
+pub(crate) async fn record(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     Query(query): Query<RecordQuery>,

@@ -104,7 +104,7 @@ async fn read_body(body: RawBody<axum::body::Body>) -> Option<DeployRequest> {
 /// `POST /api/devices/deploy`
 ///
 /// Returns the closed set of results; see the module docs.
-pub async fn deploy(
+pub(crate) async fn deploy(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     body: RawBody<axum::body::Body>,
@@ -207,7 +207,7 @@ pub async fn deploy(
 }
 
 /// Issues a new enrolment token. Used by the CLI, not by an endpoint.
-pub fn issue_token(
+pub(crate) fn issue_token(
     connection: &rusqlite::Connection,
     created_by: i64,
     ttl_seconds: u64,
@@ -231,7 +231,7 @@ pub fn issue_token(
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EnrolledDevice {
+pub(crate) struct EnrolledDevice {
     pub peer_id: String,
     pub uuid: String,
     pub enrolled_at: i64,

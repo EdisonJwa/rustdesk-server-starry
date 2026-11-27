@@ -34,7 +34,7 @@ use crate::address_book::Page;
 
 /// The `UserPayload` the client parses.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UserView {
+pub(crate) struct UserView {
     pub name: String,
     pub display_name: String,
     pub avatar: String,
@@ -48,14 +48,14 @@ pub struct UserView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GroupView {
+pub(crate) struct GroupView {
     pub name: String,
 }
 
 /// `?current=&pageSize=&accessible=&status=`
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
-pub struct UserQuery {
+pub(crate) struct UserQuery {
     pub current: Option<u64>,
     pub page_size: Option<u64>,
     /// The client sends an empty `accessible`, which means "all I may see".
@@ -85,7 +85,7 @@ fn unauthorized(auth: AuthFailure) -> Response {
 }
 
 /// `GET /api/device-group/accessible`
-pub async fn device_groups(
+pub(crate) async fn device_groups(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     Query(query): Query<UserQuery>,
@@ -145,7 +145,7 @@ pub async fn device_groups(
 }
 
 /// `GET /api/users`
-pub async fn users(
+pub(crate) async fn users(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     Query(query): Query<UserQuery>,
@@ -226,7 +226,7 @@ pub async fn users(
 /// deliberately read-only: device registry rows are written by the rendezvous
 /// path, not by an HTTP endpoint, so exposing a mutator here would be a second
 /// way to change what a device is.
-pub async fn peers(
+pub(crate) async fn peers(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
     Query(query): Query<UserQuery>,

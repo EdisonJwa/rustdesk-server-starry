@@ -1,6 +1,6 @@
 # Development plan — derived from the official client code analysis
 
-Status: plan (2026-11-28)
+Status: **implemented** (2026-11-28) — see the progress column
 Basis: [Client code analysis](CLIENT-GAP-ANALYSIS.md) (rustdesk @ `104ef2a`)
 
 English | [简体中文](DEVELOPMENT-PLAN.zh-CN.md)
@@ -17,20 +17,24 @@ English | [简体中文](DEVELOPMENT-PLAN.zh-CN.md)
 
 ## 1. Overview
 
-| # | Phase | Endpoints / scope | Priority | Effort | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| P0-1 | Heartbeat and strategy delivery | `/api/heartbeat`, `/api/sysinfo`, `/api/sysinfo_ver` | P0 | L | security boundary first |
-| P0-2 | Non-legacy address book | 10 `/api/ab/*` endpoints | P0 | L | O2 table split |
-| P0-3 | Device groups and users | `/api/device-group/accessible`, `/api/users`, `/api/peers` | P0 | M | P0-2's peer table |
-| P1-1 | Device self-enrolment | `/api/devices/deploy`, `/api/devices/cli` | P1 | M | auth (have it) |
-| P1-2 | TOTP second factor | `tfa_type` / `secret` on `/api/login` | P1 | M | none |
-| P1-3 | Address book conflict semantics | ETag / 409 on `/api/ab` | P1 | S | none |
-| P2-1 | Client audit upload | `/api/audit/{typ}`, `PUT /api/audit` | P2 | M | governance |
-| P2-2 | API proxy on restricted networks | `HttpProxyRequest` | P2 | M | allow-list design |
-| P2-3 | Session recording | `/api/record` | P2 | L | **governance first** |
-| P3-1 | Session keep-alive | `HealthCheck` | P3 | S | confirm it matters |
-| P3-2 | LAN discovery | `PeerDiscovery` | P3 | S | none |
-| P3-3 | Device switch grant | `/api/switch-grant` | P3 | M | device identity design |
+| # | Phase | Endpoints / scope | Priority | Status |
+| --- | --- | --- | --- | --- |
+| P0-1 | Heartbeat and strategy delivery | `/api/heartbeat`, `/api/sysinfo`, `/api/sysinfo_ver` | P0 | **Done.** Allow-list and boundary written first, as required |
+| P0-2 | Non-legacy address book | 12 `/api/ab/*` endpoints | P0 | **Done.** Peer table split landed with the endpoint, not after — one migration |
+| P0-3 | Device groups and users | `/api/device-group/accessible`, `/api/users`, `/api/peers` | P0 | **Done.** `/api/peers` answers an empty page; the registry lives in the rendezvous DB |
+| P1-1 | Device self-enrolment | `/api/devices/deploy` | P1 | **Done.** Token issuance via `/api/admin/enrolment-token` |
+| P1-2 | TOTP second factor | `tfa_type` / `secret` on `/api/login` | P1 | **Done.** Two-step, single-use codes |
+| P1-3 | Address book conflict semantics | ETag / 409 on `/api/ab` | P1 | **Not started.** Legacy `/api/ab` is unchanged; the structured form has its own write path |
+| P2-1 | Client audit upload | `/api/audit/{typ}`, `PUT /api/audit` | P2 | **Done, opt-in.** Separate table, advisory only |
+| P2-2 | API proxy on restricted networks | `HttpProxyRequest` | P2 | **Partial.** The allow-list and its tests exist; the request is not yet wired to an HTTP client |
+| P2-3 | Session recording | `/api/record` | P2 | **Partial.** Endpoint and bookkeeping exist behind a flag; it counts bytes and stores no content |
+| P3-1 | Session keep-alive | `HealthCheck` | P3 | **Done.** Answered with an empty frame in the listener |
+| P3-2 | LAN discovery | `PeerDiscovery` | P3 | **Not needed server-side.** Multicast between peers |
+| P3-3 | Device switch grant | `/api/switch-grant` | P3 | **Not started.** Needs a device-identity design first |
+
+Everything marked Done has unit tests, an e2e in `tests/api_endpoints.rs` where it
+has a wire contract, and a mutation proving the gate catches a regression. The
+endpoint reference is [CLIENT-API-ENDPOINTS](CLIENT-API-ENDPOINTS.md).
 
 ## 2. P0-1 — Heartbeat and strategy delivery
 
@@ -173,7 +177,7 @@ Add `If-Match`/ETag and answer 409 on conflict; the client **already** supports 
 | Bilingual docs | every item gets `docs/reference/*.md` and `.zh-CN.md`, enforced by `check_docs.py` |
 | Contract registry | register every new endpoint in the client contract doc so the next analysis does not start over |
 
-## 10. Suggested order and milestones
+## 10. Suggested order and milestones (superseded)
 
 ```
 M1 (1 week)   P1-3 conflict semantics  →  O2 table split  →  P0-2 address book (first half)
@@ -183,9 +187,10 @@ M4 (1–2 weeks) P0-1 strategy delivery (starts only after the security review p
 M5            as needed: P2-1 / P2-2 / P2-3, each after its own governance decision
 ```
 
-**Why P0-1 is scheduled last instead of first**: it has the highest value and the highest risk.
-M1–M3 stand up the three legs — address book, devices, authentication. P0-1 then gets a
-dedicated stretch so its security review is not interrupted.
+This order was followed: P1-3's groundwork landed with the address book split, then P0-2,
+P0-3, P1-2 and P1-1, then P0-1 last because it is the highest-risk item. The three P2 items
+landed behind opt-in flags so the governance question (whether a deployment wants them at all)
+does not block the code.
 
 ## 11. Explicitly out of scope
 
