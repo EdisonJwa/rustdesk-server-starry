@@ -4,13 +4,13 @@
 //! server address, the relay server address, and the server public key.
 //! Doing it by hand leaks mistakes (a rotated key pasted from memory). This
 //! tool reads the running server's `id_ed25519.pub` and renders the standard
-//! fields as text, a machine-readable JSON document, and a base64 import
-//! string for clients that support the "Import server info" flow.
+//! fields as text and a machine-readable JSON document. The client-side
+//! import-string flow is a Pro-console encrypted format and is intentionally
+//! not generated here.
 //!
 //! No private material is ever read, and no token is minted: access tokens
 //! belong to the operator's identity provider, not to this server.
 
-use base64::{encode_config, URL_SAFE_NO_PAD};
 use serde_json::json;
 use std::{
     fs,
@@ -102,21 +102,21 @@ fn main() -> ExitCode {
         }
     };
 
-    let import_json = json!({
-        "host": args.id_server,
-        "relay": args.relay_server,
-        "key": public_key,
-    });
-    let import_string = encode_config(
-        serde_json::to_vec(&import_json).expect("serialize import config"),
-        URL_SAFE_NO_PAD,
-    );
 
     let rendered = match args.format {
-        Format::Json => serde_json::to_string_pretty(&import_json).expect("serialize"),
+        Format::Json => serde_json::to_string_pretty(&json!({
+            "host": args.id_server,
+            "relay": args.relay_server,
+            "key": public_key,
+        }))
+        .expect("serialize"),
         Format::Text => {
             let mut text = format!(
-                "ID Server:      {}\nRelay Server:   {}\nPublic Key:     {}\nStrategy Group: {}\n\n=== Import string ===\nrustdesk://config?s={import_string}",
+                "ID Server:      {}\nRelay Server:   {}\nPublic Key:     {}\nStrategy Group: {}\n\n\
+                 Enter these in the client under Settings -> Network (ID Server /\n\
+                 Relay Server / Public Key), then Apply. The `config?s=` import\n\
+                 string is a Pro-console encrypted format and is intentionally\n\
+                 not generated here.",
                 args.id_server,
                 args.relay_server.as_deref().unwrap_or("(same as ID server)"),
                 public_key,
@@ -128,8 +128,7 @@ fn main() -> ExitCode {
                 ));
             }
             text
-        }
-    };
+        }    };
 
     let write_result = match &args.out {
         Some(path) => fs::write(path, rendered.as_bytes()),
