@@ -1,6 +1,6 @@
 # Strategy v1 —— 设备分组与服务端强制访问策略
 
-状态：已实现（路线 T1）——HBBS 启动时从 `STARRY_STRATEGY_FILE` 加载；未设置即关闭该引擎
+状态：已实现（路线 T1）——HBBS 启动时从 `STARRY_STRATEGY_FILE` 加载；未设置即关闭该引擎，但若策略是必需的（`STARRY_STRATEGY_REQUIRED` / `MUST_LOGIN`），则启动 fail-closed
 [English](STRATEGY-v1.md) | 简体中文
 
 ## 问题

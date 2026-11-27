@@ -1,6 +1,6 @@
 # Strategy v1 — device groups and server-enforced access policy
 
-Status: implemented (route T1) — HBBS loads the document at startup from `STARRY_STRATEGY_FILE`; unset disables the engine
+Status: implemented (route T1) — HBBS loads the document at startup from `STARRY_STRATEGY_FILE`; unset disables the engine unless a policy is required (`STARRY_STRATEGY_REQUIRED` / `MUST_LOGIN`), in which case startup fails closed
 English | [简体中文](STRATEGY-v1.zh-CN.md)
 
 ## Problem
