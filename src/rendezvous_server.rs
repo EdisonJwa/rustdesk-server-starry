@@ -2697,6 +2697,15 @@ impl RendezvousServer {
                         Some(rendezvous_message::Union::OnlineRequest(or)) => {
                             allow_err!(rs.handle_online_request(&mut stream, or.peers).await);
                         }
+                        // The client's session keep-alive: it sends `hc` and then
+                        // expects an empty frame back, and treats any
+                        // `RegisterPkResponse` here as a keep-alive update. Without
+                        // this branch it waits until `keep_alive * 1.5` expires and
+                        // drops the session. See `rendezvous_extras`.
+                        Some(rendezvous_message::Union::Hc(_)) => {
+                            let reply = crate::rendezvous_extras::health_check_reply();
+                            stream.send_bytes(hbb_common::bytes::Bytes::from(reply)).await.ok();
+                        }
                         _ => {}
                     }
                 }

@@ -296,6 +296,12 @@ pub(crate) fn log_rejection(reason: &str) {
     log::warn!("TOTP login refused: {reason}");
 }
 
+/// Diagnostic used by the e2e suite: reports the code for a given step without
+/// leaking anything an attacker could use (the caller already holds the secret).
+pub fn debug_code(secret: &[u8], step: u64) -> String {
+    totp_at(secret, step)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

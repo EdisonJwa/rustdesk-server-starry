@@ -441,6 +441,9 @@ create table if not exists ab_peers (
     login_name text not null default '',
     device_group_name text not null default '',
     note text not null default '',
+    -- Some clients report whether the peer is on this server. Nullable, because
+    -- an absent answer means unknown and must stay distinct from false.
+    same_server integer,
     updated_at integer not null,
     primary key (guid, peer_id)
 );
@@ -502,10 +505,48 @@ create table if not exists client_strategies (
     document text not null,
     modified_at integer not null
 );
+-- Devices enrolled through a one-time token.
+create table if not exists enrolled_devices (
+    peer_id text primary key,
+    uuid text not null default '',
+    pk text not null,
+    enrolled_at integer not null,
+    last_seen integer not null
+);
+-- Client-side audit events. Deliberately separate from the server-side audit
+-- trail: a client can forge anything here, so the two must never be mixed in a
+-- way that makes one look like the other.
+create table if not exists client_audit (
+    id integer primary key autoincrement,
+    user_id integer not null,
+    kind text not null,
+    payload text not null,
+    created_at integer not null
+);
+create index if not exists client_audit_user on client_audit (user_id, created_at);
+-- Operator annotations on a session, keyed by the client's session guid.
+create table if not exists session_notes (
+    guid text primary key,
+    user_id integer not null,
+    note text not null,
+    updated_at integer not null
+);
+-- Recording bookkeeping. Chunk bytes are counted, not stored: megabytes per
+-- frame do not belong in the metadata database.
+create table if not exists recordings (
+    user_id integer not null,
+    file text not null,
+    bytes integer not null default 0,
+    started_at integer not null,
+    updated_at integer not null,
+    primary key (user_id, file)
+);
 -- Pending `disconnect` instructions, drained by the next heartbeat.
 create table if not exists disconnect_requests (
-    peer_id text primary key,
-    created_at integer not null
+    peer_id text not null,
+    conn_id integer not null,
+    created_at integer not null,
+    primary key (peer_id, conn_id)
 );
 ";
 
@@ -1215,6 +1256,143 @@ impl ApiState {
         Ok(user.id)
     }
 
+    /// Removes an account's second factor.
+    pub(crate) async fn totp_remove(&self, user_id: i64) -> Result<(), String> {
+        self.db_call(move |connection| {
+            connection.execute("delete from user_totp where user_id = ?1", [user_id])?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+    }
+
+    /// Mints a one-time enrolment token for a device.
+    ///
+    /// The token itself is generated and hashed here so no caller reimplements
+    /// the fingerprint encoding.
+    pub(crate) async fn issue_enrolment_token(&self, created_by: i64) -> Result<String, String> {
+        let token = crate::enrolment::generate_token();
+        let fingerprint = crate::enrolment::token_fingerprint(&token);
+        let now = epoch_seconds();
+        // `insert` rather than the CLI helper so the API path needs no direct
+        // database handle.
+        self.db_call(move |connection| {
+            connection.execute(
+                "insert into deploy_tokens (token_hash, created_by, created_at, expires_at)
+                 values (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    fingerprint,
+                    created_by,
+                    now as i64,
+                    now.saturating_add(crate::enrolment::TOKEN_TTL_SECONDS) as i64,
+                ],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await?;
+        log::info!("enrolment token issued by account {created_by}");
+        Ok(token)
+    }
+
+    /// The strategy document stored for an account, with its `modified_at`.
+    pub(crate) async fn client_strategy(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<(String, i64)>, String> {
+        self.db_call(move |connection| {
+            let row = connection
+                .query_row(
+                    "select document, modified_at from client_strategies where user_id = ?1",
+                    [user_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .ok();
+            Ok::<_, rusqlite::Error>(row)
+        })
+        .await
+    }
+
+    /// Stores an account's strategy, bumping `modified_at`.
+    ///
+    /// Bump on every write rather than accepting one from the caller: two
+    /// operators editing the same document must not be able to make the second
+    /// write look older than the first, which would leave the client on a stale
+    /// configuration forever.
+    pub(crate) async fn set_client_strategy(
+        &self,
+        user_id: i64,
+        document: &str,
+    ) -> Result<i64, String> {
+        let document = document.to_owned();
+        self.db_call(move |connection| {
+            let modified_at = epoch_seconds() as i64;
+            connection.execute(
+                "insert into client_strategies (user_id, document, modified_at)
+                 values (?1, ?2, ?3)
+                 on conflict(user_id) do update set document = excluded.document,
+                                                    modified_at = excluded.modified_at",
+                rusqlite::params![user_id, document, modified_at],
+            )?;
+            Ok::<_, rusqlite::Error>(modified_at)
+        })
+        .await
+    }
+
+    /// Drains pending `disconnect` instructions for a device.
+    pub(crate) async fn take_disconnects(&self, peer_id: &str) -> Result<Vec<i64>, String> {
+        let peer_id = peer_id.to_owned();
+        self.db_call(move |connection| {
+            let mut statement = connection.prepare(
+                "select conn_id from disconnect_requests where peer_id = ?1 order by conn_id",
+            )?;
+            let mut rows = statement.query([peer_id.as_str()])?;
+            let mut ids = Vec::new();
+            while let Some(row) = rows.next()? {
+                ids.push(row.get::<_, i64>(0)?);
+            }
+            connection.execute(
+                "delete from disconnect_requests where peer_id = ?1",
+                [peer_id.as_str()],
+            )?;
+            Ok::<_, rusqlite::Error>(ids)
+        })
+        .await
+    }
+
+    /// Queues a disconnect instruction for a device.
+    pub(crate) async fn queue_disconnect(&self, peer_id: &str, conn_id: i64) -> Result<(), String> {
+        let peer_id = peer_id.to_owned();
+        self.db_call(move |connection| {
+            let now = epoch_seconds() as i64;
+            connection.execute(
+                "insert into disconnect_requests (peer_id, conn_id, created_at)
+                 values (?1, ?2, ?3)
+                 on conflict(peer_id, conn_id) do nothing",
+                rusqlite::params![peer_id, conn_id, now],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+    }
+
+    /// Whether client audit upload is enabled. Off unless explicitly turned on:
+    /// the data describes a user's own machine and a client can forge it.
+    pub(crate) fn client_audit_enabled(&self) -> bool {
+        feature_file_present("STARRY_CLIENT_AUDIT_FILE")
+    }
+
+    /// Whether session recording is enabled. Off unless explicitly turned on.
+    pub(crate) fn recording_enabled(&self) -> bool {
+        feature_file_present("STARRY_RECORDING_FILE")
+    }
+
+    /// Whether this deployment accepts enrolment tokens.
+    ///
+    /// Opt-in: a server that has never issued a token answers the documented
+    /// `NOT_ENABLED` rather than treating the request as malformed.
+    pub(crate) fn enrolment_enabled(&self) -> bool {
+        feature_file_present("STARRY_ENROLMENT_FILE")
+    }
+
     /// The stored Base32 TOTP secret, if the account has a second factor.
     pub(crate) async fn totp_secret(&self, user_id: i64) -> Result<Option<String>, String> {
         self.db_call(move |connection| {
@@ -1411,6 +1589,36 @@ fn router(state: Arc<ApiState>) -> Router {
             get(crate::directory::device_groups),
         )
         .route("/api/users", get(crate::directory::users))
+        // Heartbeat carries the client strategy; /api/sysinfo* is its companion.
+        .route("/api/heartbeat", post(crate::client_strategy::heartbeat))
+        .route("/api/sysinfo", post(crate::client_strategy::sysinfo))
+        .route("/api/sysinfo_ver", post(crate::client_strategy::sysinfo_version))
+        .route("/api/devices/deploy", post(crate::enrolment::deploy))
+        // Client audit and recording. Both answer 501 until enabled.
+        .route("/api/audit/:typ", post(crate::client_audit::audit_upload))
+        .route("/api/audit", axum::routing::put(crate::client_audit::audit_note))
+        .route("/api/record", post(crate::client_audit::record))
+        // Operator surface. None of this is used by the official client; it
+        // exists so an administrator (and these tests) never write the database
+        // by hand and reimplement a secret's encoding.
+        .route(
+            "/api/admin/client-strategy",
+            get(crate::admin_api::get_client_strategy)
+                .put(crate::admin_api::set_client_strategy),
+        )
+        .route("/api/admin/totp", post(crate::admin_api::enrol_totp))
+        .route(
+            "/api/admin/totp",
+            axum::routing::delete(crate::admin_api::disable_totp),
+        )
+        .route(
+            "/api/admin/enrolment-token",
+            post(crate::admin_api::issue_enrolment_token),
+        )
+        .route(
+            "/api/admin/disconnect/:peer_id",
+            post(crate::admin_api::disconnect),
+        )
         .route("/api/peers", get(crate::directory::peers))
         // OIDC: the client starts a login, then polls for its result. The
         // browser half lands on /oidc/callback, which the IdP redirects to.
@@ -1449,16 +1657,26 @@ struct LoginRequest {
     /// Second step only: the handle issued by the first step.
     #[serde(default)]
     secret: String,
-    /// Second step only. The client sends this field and `tfa_code` with the
-    /// same value, and has sent both a string and a number for it.
-    #[serde(default, deserialize_with = "crate::totp::flexible_code")]
+    /// Second step only. The client sends this and `tfaCode` with the same
+    /// value, and has sent both a string and a number for it. The wire names are
+    /// camelCase — a snake_case field here silently deserialises to empty, which
+    /// looks exactly like a wrong code.
+    #[serde(
+        default,
+        rename = "verificationCode",
+        deserialize_with = "crate::totp::flexible_code"
+    )]
     verification_code: String,
-    #[serde(default, deserialize_with = "crate::totp::flexible_code")]
+    #[serde(
+        default,
+        rename = "tfaCode",
+        deserialize_with = "crate::totp::flexible_code"
+    )]
     tfa_code: String,
     /// Device binding, kept for parity with the login payload.
-    #[serde(default)]
+    #[serde(default, rename = "deviceInfo")]
     device_info: serde_json::Value,
-    #[serde(default)]
+    #[serde(default, rename = "autoLogin")]
     auto_login: bool,
 }
 
@@ -2346,6 +2564,18 @@ fn effective_ip(config: &ApiConfig, headers: &HeaderMap, peer: IpAddr) -> IpAddr
         .and_then(|value| value.split(',').next())
         .and_then(|value| value.trim().parse::<IpAddr>().ok())
         .unwrap_or(peer)
+}
+
+/// Whether an opt-in feature is enabled.
+///
+/// Every high-trust feature here (enrolment, client audit, recording) is switched
+/// on by pointing an environment variable at a file that exists. A file rather
+/// than a boolean because it makes "this deployment deliberately enables X"
+/// auditable from the filesystem, and because creating it is a deliberate act.
+fn feature_file_present(env: &str) -> bool {
+    std::env::var(env)
+        .map(|path| !path.trim().is_empty() && std::path::Path::new(path.trim()).is_file())
+        .unwrap_or(false)
 }
 
 pub(crate) fn api_error(status: StatusCode, code: &str) -> Response {

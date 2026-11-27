@@ -88,6 +88,8 @@ pub struct BookPeer {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookTag {
     pub name: String,
+    /// Client ARGB value. The client sends an unsigned 32-bit int (Dart has no
+    /// signed widths), so this accepts the whole range and stores it as i64.
     pub color: i64,
 }
 
@@ -215,7 +217,7 @@ pub async fn peers_in_book(
             let mut statement = connection.prepare(
                 "select peer_id, hash, password, username, hostname, platform, alias, tags,
                         force_always_relay, rdp_port, rdp_username, login_name,
-                        device_group_name, note
+                        device_group_name, note, same_server
                  from ab_peers where guid = ?1
                  order by peer_id asc limit ?2 offset ?3",
             )?;
@@ -242,7 +244,7 @@ pub async fn peers_in_book(
                     login_name: row.get(11)?,
                     device_group_name: row.get(12)?,
                     note: row.get(13)?,
-                    same_server: None,
+                    same_server: row.get::<_, Option<i64>>(14)?.map(|value| value != 0),
                 });
             }
             Ok::<_, rusqlite::Error>((total.max(0) as u64, peers))
@@ -302,8 +304,9 @@ pub async fn upsert_peer(
             connection.execute(
                 "insert into ab_peers (guid, peer_id, hash, password, username, hostname,
                                         platform, alias, tags, force_always_relay, rdp_port,
-                                        rdp_username, login_name, device_group_name, note, updated_at)
-                 values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                                        rdp_username, login_name, device_group_name, note,
+                                        same_server, updated_at)
+                 values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
                  on conflict(guid, peer_id) do update set
                     hash = excluded.hash, password = excluded.password,
                     username = excluded.username, hostname = excluded.hostname,
@@ -312,7 +315,8 @@ pub async fn upsert_peer(
                     rdp_port = excluded.rdp_port, rdp_username = excluded.rdp_username,
                     login_name = excluded.login_name,
                     device_group_name = excluded.device_group_name,
-                    note = excluded.note, updated_at = excluded.updated_at",
+                    note = excluded.note, same_server = excluded.same_server,
+                    updated_at = excluded.updated_at",
                 rusqlite::params![
                     guid,
                     peer.id,
@@ -329,6 +333,7 @@ pub async fn upsert_peer(
                     peer.login_name,
                     peer.device_group_name,
                     peer.note,
+                    peer.same_server.map(|value| if value { 1 } else { 0 }),
                     now,
                 ],
             )?;
