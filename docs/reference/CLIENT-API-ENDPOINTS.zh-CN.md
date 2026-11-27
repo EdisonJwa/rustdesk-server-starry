@@ -115,9 +115,18 @@
 
 - **`HealthCheck`（`hc`）** 现在回一个空帧，这正是客户端保活循环期望的。没有它，
   连接会一直等到 `keep_alive * 1.5` 超时后断开。
-- **`HttpProxyRequest`** 走白名单且默认关闭（`STARRY_HTTP_PROXY_ALLOW`）：主机精确
-  匹配、仅 `/api/` 路径、仅 `GET`/`POST`，且点段、重复斜杠、反斜杠与 `%2e`
-  一律拒绝而不做解析。
+- **`HttpProxyRequest`** 走白名单、默认关闭，且**现在真的会发请求**，不再只是检查
+  "允许不允许"。两个变量：
+
+  | 变量 | 含义 |
+  | --- | --- |
+  | `STARRY_HTTP_PROXY_ALLOW` | 允许代理到的 `host[:port]`，逗号分隔；不设即关闭 |
+  | `STARRY_HTTP_PROXY_TARGET` | 请求发往的 API 基址；不设则回 `proxy_target_unconfigured` |
+
+  规则：主机精确匹配（无通配、无后缀匹配）、仅 `/api/` 路径，且点段、单独的 `.`、
+  重复斜杠、反斜杠与 `%2e` 一律拒绝而不做解析。客户端给的 `Host` 与
+  `Content-Length` 会被丢弃——HTTP 客户端自己会设。响应上限 1 MiB，因为白名单内的
+  主机也可能恶意或只是话多。
 - **`PeerDiscovery`** 无需服务端代码：它是对端之间的多播。
 
 ## 门禁

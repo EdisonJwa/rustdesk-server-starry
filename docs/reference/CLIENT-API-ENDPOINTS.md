@@ -122,10 +122,19 @@ All require an administrator bearer token.
 - **`HealthCheck` (`hc`)** is now answered with an empty frame, which is what the
   client's keep-alive loop expects. Without it a session waits for
   `keep_alive * 1.5` and drops.
-- **`HttpProxyRequest`** is allow-listed and off by default
-  (`STARRY_HTTP_PROXY_ALLOW`): exact host match, `/api/` paths only, `GET`/`POST`
-  only, and dot segments, repeated slashes, backslashes and `%2e` are refused
-  rather than resolved.
+- **`HttpProxyRequest`** is allow-listed, off by default, and now performs the
+  request rather than merely checking whether it may. Two variables configure it:
+
+  | Variable | Meaning |
+  | --- | --- |
+  | `STARRY_HTTP_PROXY_ALLOW` | comma-separated `host[:port]` this may be proxied to; unset means the feature is off |
+  | `STARRY_HTTP_PROXY_TARGET` | the API base URL to send the request to; unset answers `proxy_target_unconfigured` |
+
+  Rules: exact host match (no wildcard, no suffix match), `/api/` paths only, and
+  dot segments, a bare `.`, repeated slashes, backslashes and `%2e` are refused
+  rather than resolved. `Host` and `Content-Length` from the client are dropped —
+  the HTTP client sets those itself. The response is capped at 1 MiB, because an
+  allow-listed host can still be hostile or merely verbose.
 - **`PeerDiscovery`** needs no server code: it is multicast between peers.
 
 ## Gates

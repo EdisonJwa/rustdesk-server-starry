@@ -26,7 +26,7 @@ English | [简体中文](DEVELOPMENT-PLAN.zh-CN.md)
 | P1-2 | TOTP second factor | `tfa_type` / `secret` on `/api/login` | P1 | **Done.** Two-step, single-use codes |
 | P1-3 | Address book conflict semantics | ETag / 409 on `/api/ab` | P1 | **Not started.** Legacy `/api/ab` is unchanged; the structured form has its own write path |
 | P2-1 | Client audit upload | `/api/audit/{typ}`, `PUT /api/audit` | P2 | **Done, opt-in.** Separate table, advisory only |
-| P2-2 | API proxy on restricted networks | `HttpProxyRequest` | P2 | **Partial.** The allow-list and its tests exist; the request is not yet wired to an HTTP client |
+| P2-2 | API proxy on restricted networks | `HttpProxyRequest` | P2 | **Done.** Allow-list plus a real request, tested over a socket |
 | P2-3 | Session recording | `/api/record` | P2 | **Partial.** Endpoint and bookkeeping exist behind a flag; it counts bytes and stores no content |
 | P3-1 | Session keep-alive | `HealthCheck` | P3 | **Done.** Answered with an empty frame in the listener |
 | P3-2 | LAN discovery | `PeerDiscovery` | P3 | **Not needed server-side.** Multicast between peers |

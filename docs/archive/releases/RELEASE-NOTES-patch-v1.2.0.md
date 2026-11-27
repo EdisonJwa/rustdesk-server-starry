@@ -93,9 +93,9 @@ docker pull ghcr.io/q1ngyang/rustdesk-server-starry:1.1.16-patch-v1.2.0
 - `--must-login` is a deployment enforce floor that config reload and the
   remote management plane cannot lower.
 
-See the [authentication profile](../reference/auth/v1/profile.md) for the
+See the [authentication profile](../../reference/auth/v1/profile.md) for the
 normative rules. Byte fixtures remain under
-[`contracts/auth/v1`](../../contracts/auth/v1).
+[`contracts/auth/v1`](../../../contracts/auth/v1).
 
 ## Relay visibility and simulation
 
@@ -142,7 +142,7 @@ normative rules. Byte fixtures remain under
   is a single-link regular file owned by the Agent's effective UID and primary
   GID, so an ownership-preserving atomic replacement cannot fail late.
 
-See [`contracts/control/v1/openapi.yaml`](../../contracts/control/v1/openapi.yaml) and
+See [`contracts/control/v1/openapi.yaml`](../../../contracts/control/v1/openapi.yaml) and
 the [Control Agent guide](https://github.com/q1ngyang/rustdesk-server-starry/wiki/Control-Agent).
 
 ## Upgrade and rollout

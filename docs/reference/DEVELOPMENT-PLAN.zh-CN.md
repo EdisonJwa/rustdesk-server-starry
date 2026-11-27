@@ -24,7 +24,7 @@
 | P1-2 | TOTP 两步验证 | `/api/login` 的 `tfa_type` / `secret` | P1 | **已完成。** 两步，验证码一次性 |
 | P1-3 | 地址簿冲突语义 | `/api/ab` 的 ETag / 409 | P1 | **未开始。** legacy `/api/ab` 未改；结构化形态有自己的写入路径 |
 | P2-1 | 客户端审计上传 | `/api/audit/{typ}`、`PUT /api/audit` | P2 | **已完成，需显式开启。** 独立表，仅供参考 |
-| P2-2 | 受限网络 API 代理 | `HttpProxyRequest` | P2 | **部分。** 白名单与测试已就位；请求尚未接到 HTTP 客户端 |
+| P2-2 | 受限网络 API 代理 | `HttpProxyRequest` | P2 | **已完成。** 白名单 + 真实请求，在 socket 上测过 |
 | P2-3 | 会话录像 | `/api/record` | P2 | **部分。** 端点与记账在开关之后；只统计字节，不存内容 |
 | P3-1 | 会话保活 | `HealthCheck` | P3 | **已完成。** 在监听器里回空帧 |
 | P3-2 | LAN 发现 | `PeerDiscovery` | P3 | **服务端无需实现。** 对端之间多播 |
