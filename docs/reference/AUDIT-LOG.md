@@ -66,8 +66,10 @@ starry-audit-export /var/lib/rustdesk-server-starry/audit \
 ```
 
 Columns are fixed: `timestamp_utc,kind,transport,verdict,reason,client_ip,
-mode,source_file`; fields containing commas or quotes follow RFC 4180. Range
-filters are inclusive UTC calendar days.
+mode,group,source_file`; fields containing commas or quotes follow RFC 4180.
+Range filters are inclusive UTC calendar days. `group` is the strategy group the
+target resolved to (or the string produced by the resolver, e.g. `general` when
+no policy is loaded).
 
 ## Kubernetes
 

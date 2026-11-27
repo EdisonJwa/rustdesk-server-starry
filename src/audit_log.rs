@@ -237,6 +237,32 @@ pub(crate) fn record_decision(
     });
 }
 
+/// Records a strategy group refusal.
+///
+/// A `deny` verdict never reaches [`record_decision`]: the strategy engine
+/// refuses the target before JWT evaluation, so without this the refusal reason
+/// an operator most wants to see would be the only one missing from the evidence
+/// trail. Auditing is still gated on `STARRY_AUDIT_DIR` being configured, and
+/// the mode reads `enforce` because a group deny is unconditional.
+pub(crate) fn record_strategy_denial(
+    kind: ConnectionAttemptKind,
+    transport: SignalTransport,
+    reason: &str,
+    client_ip: &str,
+    group: &str,
+) {
+    record(AuditEvent {
+        epoch_seconds: epoch_seconds(),
+        kind,
+        transport,
+        verdict: "deny",
+        reason: reason.to_owned(),
+        client_ip: client_ip.to_owned(),
+        mode: mode_label(&ConnectionAuthMode::Enforce),
+        group: group.to_owned(),
+    });
+}
+
 fn epoch_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

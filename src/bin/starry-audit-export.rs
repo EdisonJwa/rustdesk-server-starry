@@ -23,7 +23,7 @@ use hbbs::audit_log::{kind_label, read_all_events, transport_label, AuditEvent};
 
 /// CSV header, fixed on purpose: consumers can rely on column order.
 const CSV_HEADER: &str =
-    "timestamp_utc,kind,transport,verdict,reason,client_ip,mode,source_file";
+    "timestamp_utc,kind,transport,verdict,reason,client_ip,mode,group,source_file";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -133,6 +133,7 @@ fn write_csv<W: Write>(out: &mut W, events: &[(String, AuditEvent)]) -> std::io:
             event.reason.clone(),
             event.client_ip.clone(),
             event.mode.to_owned(),
+            event.group.clone(),
             file_name.clone(),
         ];
         let line = row

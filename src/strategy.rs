@@ -129,7 +129,17 @@ pub(crate) fn check_target(device_id: &str) -> TargetCheck {
             deny_reason: None,
         };
     };
-    match strategy.group_index(device_id) {
+    // The default group is the catch-all: a device matching no rule is *in*
+    // that group, so its verdict applies. Reading only the name left
+    // `deny`/`require_scope` on the default group unenforced, which turned an
+    // operator's deny-by-default document into an allow-all.
+    let index = strategy.group_index(device_id).or_else(|| {
+        strategy
+            .groups
+            .iter()
+            .position(|group| group.name == strategy.default_group)
+    });
+    match index {
         Some(index) => {
             let group = &strategy.groups[index];
             TargetCheck {
@@ -138,6 +148,8 @@ pub(crate) fn check_target(device_id: &str) -> TargetCheck {
                 deny_reason: group.deny.then_some("strategy_group_denied"),
             }
         }
+        // validate() rejects a document whose default_group has no entry, so
+        // this is unreachable for a loaded strategy.
         None => TargetCheck {
             group: strategy.default_group.clone(),
             required_scope: None,
@@ -164,6 +176,81 @@ pub fn reload() -> Result<Option<(u32, String)>, String> {
         Some(Arc::new(strategy));
     RELOADS.fetch_add(1, Ordering::Relaxed);
     Ok(Some((version, digest)))
+}
+
+/// Whether a managed deployment requires the strategy engine to be live.
+///
+/// `STARRY_STRATEGY_REQUIRED=1` (or the `MUST_LOGIN` floor, which turns the
+/// deployment managed) makes a configured-but-unloadable policy a startup
+/// failure instead of a silently disabled engine. Operators who deliberately
+/// run without a policy leave it unset.
+fn policy_is_required() -> bool {
+    if crate::connection_auth::must_login_floor() {
+        return true;
+    }
+    let enabled = |value: &str| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "y" | "yes" | "true" | "on"
+        )
+    };
+    crate::common::env_var("STARRY_STRATEGY_REQUIRED")
+        .ok()
+        .as_deref()
+        .is_some_and(enabled)
+}
+
+/// Startup gate for the strategy engine.
+///
+/// A managed deployment (`policy_is_required()`) must end up with a loaded
+/// policy: a configured document that fails to load is a hard error, and so is
+/// a required-but-unconfigured one. Any other deployment logs and continues, as
+/// before.
+pub fn startup() -> Result<Option<(u32, String)>, String> {
+    let outcome = reload();
+    let required = policy_is_required();
+    match (&outcome, required) {
+        (Err(err), true) => Err(format!(
+            "strategy policy is required but failed to load: {err}"
+        )),
+        (Ok(None), true) => Err(
+            "strategy policy is required (STARRY_STRATEGY_REQUIRED / MUST_LOGIN) but \
+             STARRY_STRATEGY_FILE is not set"
+                .to_owned(),
+        ),
+        _ => Ok(outcome?),
+    }
+}
+
+/// Runtime reload with the same managed-mode gate as [`startup`].
+///
+/// A failed reload keeps the previously loaded policy in force, which is the
+/// safe behaviour. What a managed deployment must *not* do is accept a reload
+/// that would leave it with no policy at all (someone unset the env var or
+/// pointed it at nothing), so that case is refused rather than applied.
+pub fn reload_checked() -> Result<Option<(u32, String)>, String> {
+    if configured_path().is_none() && policy_is_required() {
+        return Err(
+            "reload refused: the strategy policy is required but STARRY_STRATEGY_FILE is not set"
+                .to_owned(),
+        );
+    }
+    let outcome = reload();
+    if let (Err(err), true) = (&outcome, policy_is_required()) {
+        return Err(format!(
+            "reload refused: the strategy policy is required and the new document is invalid: {err}"
+        ));
+    }
+    outcome
+}
+
+/// Whether the engine currently has a loaded policy.
+pub(crate) fn is_enabled() -> bool {
+    RUNTIME
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .ok()
+        .is_some_and(|slot| slot.is_some())
 }
 
 fn disable() {
@@ -283,6 +370,12 @@ pub(crate) fn status() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// These tests drive the engine through `STARRY_STRATEGY_FILE` and
+    /// `STARRY_STRATEGY_REQUIRED`, which are process-global; running them in
+    /// parallel would let one test observe another's environment.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn document(yaml: &str) -> Strategy {
         let parsed: StrategyDocument = serde_yml::from_str(yaml).expect("parse");
@@ -293,14 +386,14 @@ mod tests {
 
     #[test]
     fn disabled_engine_gives_general_with_no_overrides() {
-        let previous = std::env::var("STARRY_STRATEGY_FILE").ok();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Clear both the env var and the runtime slot: another test may have
+        // installed a document, and the slot outlives an env change.
         std::env::remove_var("STARRY_STRATEGY_FILE");
+        disable();
         let check = check_target("anything");
         assert_eq!(check.group, "general");
         assert!(check.required_scope.is_none() && check.deny_reason.is_none());
-        if let Some(previous) = previous {
-            std::env::set_var("STARRY_STRATEGY_FILE", previous);
-        }
     }
 
     #[test]
@@ -374,5 +467,134 @@ mod tests {
         let strategy = document(BASIC);
         assert_eq!(strategy.version(), 1);
         assert_eq!(strategy.digest().len(), 16);
+    }
+
+    /// Install a document through the real reload path so `check_target` is
+    /// exercised end to end rather than a copy of its resolution logic.
+    fn install(yaml: &str) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("strategy.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        std::env::set_var("STARRY_STRATEGY_FILE", &path);
+        reload().expect("install the strategy").expect("engine enabled");
+        directory
+    }
+
+    fn uninstall() {
+        std::env::remove_var("STARRY_STRATEGY_FILE");
+        disable();
+    }
+
+    /// The default group is a real group: a device that matches no rule is in
+    /// it, so its `deny` must apply. Reading only the name turned an operator's
+    /// deny-by-default document into an allow-all.
+    #[test]
+    fn default_group_deny_applies_to_unmatched_devices() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _directory = install(
+            r#"version: 1
+default_group: locked
+groups:
+  - name: locked
+    deny: true
+  - name: lab
+    ids: ["lab-1"]
+"#,
+        );
+        let matched = check_target("lab-1");
+        assert_eq!(matched.group, "lab");
+        assert!(
+            matched.deny_reason.is_none(),
+            "an explicitly listed group must not inherit the default deny"
+        );
+
+        let unmatched = check_target("not-in-any-rule");
+        assert_eq!(unmatched.group, "locked");
+        assert_eq!(
+            unmatched.deny_reason,
+            Some("strategy_group_denied"),
+            "an unmatched device must inherit the default group's deny"
+        );
+        uninstall();
+    }
+
+    #[test]
+    fn default_group_require_scope_applies_to_unmatched_devices() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _directory = install(
+            r#"version: 1
+default_group: guarded
+groups:
+  - name: guarded
+    require_scope: "connect:strict"
+  - name: lab
+    ids: ["lab-1"]
+"#,
+        );
+        assert_eq!(
+            check_target("not-in-any-rule").required_scope.as_deref(),
+            Some("connect:strict"),
+            "an unmatched device must inherit the default group's scope"
+        );
+        assert!(
+            check_target("lab-1").required_scope.is_none(),
+            "a matched group keeps its own (absent) override"
+        );
+        uninstall();
+    }
+
+    /// A managed deployment must not start with a policy that failed to load.
+    #[test]
+    fn required_policy_fails_closed_when_the_document_is_broken() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("strategy.yaml");
+        std::fs::write(&path, "version: 1\ndefault_group: general\ngroups:\n")
+            .unwrap();
+        std::env::set_var("STARRY_STRATEGY_FILE", &path);
+        std::env::set_var("STARRY_STRATEGY_REQUIRED", "1");
+        let outcome = startup();
+        std::env::remove_var("STARRY_STRATEGY_REQUIRED");
+        std::env::remove_var("STARRY_STRATEGY_FILE");
+        let err = outcome.expect_err("a required policy that cannot load must be fatal");
+        assert!(
+            err.contains("required but failed to load"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A required policy that was never configured is equally fatal.
+    #[test]
+    fn required_policy_fails_closed_when_unconfigured() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("STARRY_STRATEGY_FILE");
+        std::env::set_var("STARRY_STRATEGY_REQUIRED", "1");
+        let outcome = startup();
+        std::env::remove_var("STARRY_STRATEGY_REQUIRED");
+        let err = outcome.expect_err("a required policy with no file must be fatal");
+        assert!(
+            err.contains("STARRY_STRATEGY_FILE is not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Compatibility deployments keep the old behaviour: log and continue.
+    #[test]
+    fn optional_policy_tolerates_a_broken_document() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("strategy.yaml");
+        std::fs::write(&path, "version: 9\ndefault_group: general\ngroups:\n  - name: general\n")
+            .unwrap();
+        std::env::set_var("STARRY_STRATEGY_FILE", &path);
+        std::env::remove_var("STARRY_STRATEGY_REQUIRED");
+        let outcome = startup();
+        std::env::remove_var("STARRY_STRATEGY_FILE");
+        assert!(
+            outcome.is_err(),
+            "the load error must still be reported to the caller"
+        );
+        uninstall();
+        assert!(!is_enabled(), "a rejected document must not install a policy");
     }
 }

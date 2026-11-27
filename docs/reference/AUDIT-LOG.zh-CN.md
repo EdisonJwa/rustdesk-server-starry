@@ -61,8 +61,8 @@ starry-audit-export /var/lib/rustdesk-server-starry/audit \
 ```
 
 列顺序固定：`timestamp_utc,kind,transport,verdict,reason,client_ip,
-mode,source_file`；含逗号或引号的字段遵循 RFC 4180。范围过滤为包含边界的 UTC
-自然日。
+mode,group,source_file`；含逗号或引号的字段遵循 RFC 4180。范围过滤为包含边界的
+UTC 自然日。`group` 是策略引擎解析出的目标所属组（未加载策略时为 `general`）。
 
 ## Kubernetes
 

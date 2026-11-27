@@ -1082,6 +1082,17 @@ impl RendezvousServer {
                             "Connection authentication denied: kind=punch_hole transport={:?} reason={}",
                             signal_transport, reason
                         );
+                        // The strategy engine refuses before JWT evaluation, so
+                        // this verdict never reaches the connection-auth audit
+                        // path; record it here or the evidence trail would miss
+                        // the one refusal an operator configured explicitly.
+                        crate::audit_log::record_strategy_denial(
+                            connection_auth::ConnectionAttemptKind::PunchHole,
+                            signal_transport,
+                            reason,
+                            &effective_addr.ip().to_string(),
+                            &target.group,
+                        );
                         let mut denied = RendezvousMessage::new();
                         denied.set_punch_hole_response(PunchHoleResponse {
                             failure: punch_hole_response::Failure::OFFLINE.into(),
@@ -1188,6 +1199,13 @@ impl RendezvousServer {
                         log::warn!(
                             "Connection authentication denied: kind=request_relay transport={:?} reason={}",
                             signal_transport, reason
+                        );
+                        crate::audit_log::record_strategy_denial(
+                            connection_auth::ConnectionAttemptKind::RequestRelay,
+                            signal_transport,
+                            reason,
+                            &effective_addr.ip().to_string(),
+                            &target.group,
                         );
                         let mut denied = RendezvousMessage::new();
                         denied.set_relay_response(RelayResponse {
@@ -2371,7 +2389,7 @@ impl RendezvousServer {
                 let value = crate::strategy::status();
                 local_control::Response::success(request_id, value)
             }
-            "strategy.reload" if empty_params => match crate::strategy::reload() {
+            "strategy.reload" if empty_params => match crate::strategy::reload_checked() {
                 Ok(Some((version, digest))) => local_control::Response::success(
                     request_id,
                     serde_json::json!({"ok": true, "version": version, "digest": digest}),

@@ -14,3 +14,10 @@
 **/.env.example text eol=lf
 examples/.env.example text eol=lf
 PATCH_VERSION text eol=lf
+# check_workflows.py hashes this file byte-for-byte, so it must never be
+# line-ending converted on a Windows checkout.
+Cargo.lock text eol=lf
+# CI verifies the vendored hbb_common with `diff -r` against the upstream
+# commit, and these fixtures are part of that comparison: any line-ending
+# conversion on checkout would surface as a spurious difference.
+libs/hbb_common/tests/data/*.pem -text -diff
