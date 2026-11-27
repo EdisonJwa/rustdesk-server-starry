@@ -1,6 +1,6 @@
 # Strategy v1 — device groups and server-enforced access policy
 
-Status: draft for implementation (route T1)
+Status: implemented (route T1) — HBBS loads the document at startup from `STARRY_STRATEGY_FILE`; unset disables the engine
 English | [简体中文](STRATEGY-v1.zh-CN.md)
 
 ## Problem
@@ -55,6 +55,10 @@ groups:
 - `groups[].name` must be unique; `ids` are exact matches, `id_prefixes` are
   prefix matches; the most specific rule wins (exact over prefix, longer
   prefix over shorter); unmatched devices fall into `default_group`.
+- `default_group` is a real group, not just a label: a device matching no rule
+  is **in** it, so that group's `deny` and `require_scope` apply to it. A
+  document that denies the default group therefore denies everything it does
+  not explicitly allow.
 - `require_scope` replaces the connection-auth `required_scope` for requests
   **targeting** that group's devices; a token without it is denied with
   reason `missing_group_scope`.
@@ -64,6 +68,19 @@ groups:
 The document is loaded at startup and re-read on demand (`strategy.reload`
 local-control method, mirroring `runtime.reload`); the content hash is
 reported by `/healthz` and `strategy.status`.
+
+### Fail-closed behaviour
+
+| Deployment | Broken/unset document | Effect |
+| --- | --- | --- |
+| Compatibility (default) | logs the load error, engine stays disabled | HBBS starts |
+| Managed: `STARRY_STRATEGY_REQUIRED=1` or `MUST_LOGIN` | refuses to start | `hbbs` exits with `Strategy engine startup failed` |
+
+A managed deployment must never come up with a policy it could not load: doing so
+would silently run unrestricted. For the same reason a runtime `strategy.reload`
+that would leave the engine without a policy (file unset, or the new document
+invalid) is refused rather than applied, and the previously loaded policy stays
+in force.
 
 ## Enforcement points
 
@@ -76,7 +93,11 @@ reported by `/healthz` and `strategy.status`.
    reports `missing_group_scope` for group-scope shortfalls, keeping the
    global `missing_scope` reason for the unscoped configuration.
 3. Audit events gain a `group` field (additive; existing consumers ignore
-   unknown fields). The CSV exporter's column set is unchanged in v1.
+   unknown fields), and the CSV exporter carries the same column. A strategy
+   `deny` bypasses `connection_auth` entirely, so it is recorded explicitly as
+   verdict `deny` with reason `strategy_group_denied` — otherwise the one
+   refusal an operator configured on purpose would be absent from the evidence
+   trail.
 
 ## Non-goals
 

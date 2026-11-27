@@ -97,6 +97,16 @@ the official RustDesk Server version with the Starry patch version, for example
   overrides a client-supplied one when fast_relay owns the choice.
 - Relay reachability was probed only when more than one relay was configured, so
   a single-relay deployment could leave its only relay unmarked.
+- The strategy default group's `deny` and `require_scope` were not applied to
+  devices that matched no rule: only the group's name was read, so a
+  deny-by-default document silently allowed everything else.
+- A configured-but-unloadable strategy document left the engine disabled while
+  HBBS started. A managed deployment (`STARRY_STRATEGY_REQUIRED=1` or
+  `MUST_LOGIN`) now fails closed at startup, and a runtime reload that would
+  leave no policy is refused instead of applied.
+- A strategy group refusal bypassed `connection_auth`, so it never reached the
+  audit trail. It is now recorded with the group, and the CSV export carries the
+  `group` column the documentation already described.
 
 ### Security
 

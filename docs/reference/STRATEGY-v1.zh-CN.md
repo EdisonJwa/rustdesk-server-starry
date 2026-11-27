@@ -1,6 +1,6 @@
 # Strategy v1 —— 设备分组与服务端强制访问策略
 
-状态：实施中草案（路线 T1）
+状态：已实现（路线 T1）——HBBS 启动时从 `STARRY_STRATEGY_FILE` 加载；未设置即关闭该引擎
 [English](STRATEGY-v1.md) | 简体中文
 
 ## 问题
@@ -47,6 +47,9 @@ groups:
 - `groups[].name` 唯一；`ids` 为精确匹配，`id_prefixes` 为前缀匹配；最具体
   规则胜出（精确优于前缀，长前缀优于短前缀）；未命中的设备落入
   `default_group`。
+- `default_group` 是真实分组而非标签：未命中任何规则的设备**属于**它，因此该
+  组的 `deny` 与 `require_scope` 对其生效。把默认组设为 deny，就等于拒绝所有
+  未被显式放行的设备。
 - `require_scope` 在请求**指向该组设备**时替换连接认证的 `required_scope`；
   不具备的 token 以 `missing_group_scope` 拒绝。
 - `deny: true` 以 `strategy_group_denied` 拒绝所有指向该组设备的请求，且在
@@ -54,6 +57,17 @@ groups:
 
 文档在启动时加载，按需重读（local-control 方法 `strategy.reload`，与
 `runtime.reload` 同型）；内容哈希由 `/healthz` 与 `strategy.status` 上报。
+
+### fail-closed 行为
+
+| 部署形态 | 文档损坏或未配置 | 结果 |
+| --- | --- | --- |
+| 兼容模式（默认） | 记录加载错误，引擎保持关闭 | HBBS 正常启动 |
+| 受管模式：`STARRY_STRATEGY_REQUIRED=1` 或 `MUST_LOGIN` | 拒绝启动 | `hbbs` 以 `Strategy engine startup failed` 退出 |
+
+受管部署绝不能带着加载不了的策略启动——那等于静默地无限制运行。同理，会使
+引擎失去策略的运行时 `strategy.reload`（文件被取消配置，或新文档非法）会被
+拒绝而不是生效，此前加载的策略继续有效。
 
 ## 强制点
 
@@ -63,8 +77,10 @@ groups:
 2. `connection_auth::authorize_connection_attempt` 增加 target 检查参数；内部
    scope 校验在存在覆盖时使用之，组 scope 不足时报告 `missing_group_scope`，
    未配置覆盖的全局配置仍报 `missing_scope`。
-3. 审计事件增加 `group` 字段（增量式；既有消费方忽略未知字段）。CSV 导出器的
-   列集合在 v1 保持不变。
+3. 审计事件增加 `group` 字段（增量式；既有消费方忽略未知字段），CSV 导出器
+   携带同一列。策略 `deny` 完全绕过 `connection_auth`，因此单独记录为 verdict
+   `deny`、reason `strategy_group_denied`——否则运维特意配置的那一条拒绝反而
+   不会出现在证据链里。
 
 ## 非目标
 
