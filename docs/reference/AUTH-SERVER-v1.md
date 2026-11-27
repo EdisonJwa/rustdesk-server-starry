@@ -101,10 +101,13 @@ connection_auth:
     file: auth/jwks.json # relative to this config file's directory
 ```
 
-Clients reach the API at `http://<host>:21114`. Passwords must not cross the
-network in clear text beyond a trusted network, so terminate TLS in front of it
-(set `STARRY_API_TRUST_PROXY=1` and point the client's API Server field at the
-HTTPS URL).
+Clients must reach the API over TLS: the login endpoint carries passwords.
+`deploy/caddy/Caddyfile` is a ready ingress that gives the API its own public
+name (`https://rustdesk.example.com` → `127.0.0.1:21114`) and also terminates
+TLS plus ACME for any other HTTP service on the host (Jitsi, for example).
+Point the client's API Server field at that HTTPS URL and keep
+`STARRY_API_TRUST_PROXY=1` so login rate limiting keys on the real client
+address rather than the proxy's loopback address.
 
 ### The JWKS freshness rule
 

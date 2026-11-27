@@ -22,6 +22,9 @@ Environment=STARRY_API_ISSUER=https://starry-audit-observer.local
 Environment=STARRY_API_AUDIENCE=rustdesk-connect
 Environment=STARRY_API_SCOPE=connect:initiate
 Environment=STARRY_API_JWKS_HEARTBEAT_SECONDS=300
+# Behind a TLS terminator (Caddy/nginx) this makes login rate limiting key on
+# the forwarded client address instead of the proxy's loopback address.
+Environment=STARRY_API_TRUST_PROXY=1
 Environment=STARRY_API_BCRYPT_COST=12
 ExecStart=/opt/starry/bin/starry-api serve
 Restart=always

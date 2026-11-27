@@ -94,9 +94,12 @@ connection_auth:
     file: auth/jwks.json # 相对于该配置文件所在目录
 ```
 
-客户端通过 `http://<host>:21114` 访问 API。密码不应在不可信网络上明文传输，
-请在前置 TLS 终结器（此时设 `STARRY_API_TRUST_PROXY=1`，客户端 API Server 填
-HTTPS 地址）。
+客户端必须经 TLS 访问 API：登录接口承载密码，不能裸奔。
+`deploy/caddy/Caddyfile` 是一份现成的入口配置，给 API 一个独立公网名字
+（`https://rustdesk.example.com` → `127.0.0.1:21114`），同时为该主机上其它
+HTTP 服务（例如 Jitsi）统一做 TLS 终结与 ACME。客户端 API Server 填该 HTTPS
+地址，并保持 `STARRY_API_TRUST_PROXY=1`，让登录限速按真实客户端地址而不是
+代理的回环地址计数。
 
 ### JWKS 新鲜度规则
 

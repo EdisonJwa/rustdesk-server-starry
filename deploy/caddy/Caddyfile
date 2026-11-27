@@ -1,0 +1,23 @@
+# Public ingress for a host that runs both Jitsi Meet and the Starry API.
+#
+# Topology it expects:
+#   * Jitsi's web container is published on loopback in plain HTTP
+#     (HTTP_PORT=127.0.0.1:8081 in the compose .env); it never terminates TLS.
+#   * starry-api listens on 127.0.0.1:21114 and treats X-Forwarded-For as the
+#     client address (STARRY_API_TRUST_PROXY=1).
+#   * Caddy owns 80/443 for every name below and is the only ACME client, so
+#     remove ENABLE_LETSENCRYPT from the container or let it lapse.
+#
+# Replace the host names with your own. RustDesk clients use the API host as
+# their "API Server"; the ID/relay traffic stays on the 21115-21119 ports and
+# does not pass through here.
+
+meet.example.com, whiteboard.meet.example.com {
+	header Strict-Transport-Security "max-age=63072000"
+	reverse_proxy 127.0.0.1:8081
+}
+
+# RustDesk-compatible accounts API (starry-api).
+rustdesk.example.com {
+	reverse_proxy 127.0.0.1:21114
+}
