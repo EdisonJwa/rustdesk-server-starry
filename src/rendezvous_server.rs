@@ -2706,6 +2706,34 @@ impl RendezvousServer {
                             let reply = crate::rendezvous_extras::health_check_reply();
                             stream.send_bytes(hbb_common::bytes::Bytes::from(reply)).await.ok();
                         }
+                        // A client that can reach only hbbs ports may still need
+                        // the API. The reply is built by `rendezvous_extras`,
+                        // which owns the allow-list; an unconfigured or
+                        // disallowed target answers with `error` and no body.
+                        Some(rendezvous_message::Union::HttpProxyRequest(request)) => {
+                            let response = match std::env::var("STARRY_HTTP_PROXY_TARGET") {
+                                Ok(target) if !target.trim().is_empty() => {
+                                    // Blocking HTTP inside a spawned task: this
+                                    // connection is doing nothing else, and
+                                    // moving it to the blocking pool would need
+                                    // an owned copy of a protobuf message for no
+                                    // gain.
+                                    crate::rendezvous_extras::execute_proxy_request(
+                                        &request,
+                                        target.trim(),
+                                    )
+                                }
+                                _ => {
+                                    let mut refusal =
+                                        hbb_common::rendezvous_proto::HttpProxyResponse::new();
+                                    refusal.error = "proxy_target_unconfigured".to_owned();
+                                    refusal
+                                }
+                            };
+                            let mut msg_out = RendezvousMessage::new();
+                            msg_out.set_http_proxy_response(response);
+                            stream.send(&msg_out).await.ok();
+                        }
                         _ => {}
                     }
                 }
