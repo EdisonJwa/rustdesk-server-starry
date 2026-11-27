@@ -1,0 +1,37 @@
+{{- if not .Values.hbbs.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "starry.fullname" . }}-hbbs
+  labels:
+    {{- include "starry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hbbs
+spec:
+  accessModes:
+    {{- toYaml .Values.hbbs.persistence.accessModes | nindent 4 }}
+  {{- with .Values.hbbs.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.hbbs.persistence.size }}
+{{- end }}
+---
+{{- if not .Values.hbbr.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "starry.fullname" . }}-hbbr
+  labels:
+    {{- include "starry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hbbr
+spec:
+  accessModes:
+    {{- toYaml .Values.hbbr.persistence.accessModes | nindent 4 }}
+  {{- with .Values.hbbr.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.hbbr.persistence.size }}
+{{- end }}

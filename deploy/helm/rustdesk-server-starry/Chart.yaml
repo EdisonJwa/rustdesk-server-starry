@@ -1,0 +1,26 @@
+# Starry RustDesk Server Helm chart.
+#
+# The data plane is two processes with fixed RustDesk ports: HBBS (21115/21116
+# tcp+udp/21117 native and WebSocket signalling) and HBBR (21117 relay). The
+# upstream images bind fixed ports and expect host networking, so this chart
+# deploys one HBBS and one HBBR per node and does not scale a service across
+# replicas; run several nodes and point clients at each node's own address.
+#
+# Account and management APIs are a separate trust boundary and are not part of
+# this chart.
+apiVersion: v2
+name: rustdesk-server-starry
+description: Starry HBBS signalling and HBBR relay with Geo/quality-aware Relay selection
+type: application
+version: 0.1.0
+appVersion: "1.1.16-patch-v1.3.1"
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - rustdesk
+  - remote-desktop
+  - relay
+home: https://github.com/q1ngyang/rustdesk-server-starry
+sources:
+  - https://github.com/q1ngyang/rustdesk-server-starry
+annotations:
+  category: Infrastructure

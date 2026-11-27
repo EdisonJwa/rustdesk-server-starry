@@ -1,0 +1,26 @@
+{{- if .Values.hbbr.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "starry.fullname" . }}-hbbr
+  labels:
+    {{- include "starry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hbbr
+    {{- with .Values.hbbr.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "starry.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hbbr-metrics
+  endpoints:
+    - port: ops
+      path: /metrics
+      interval: {{ .Values.hbbr.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.hbbr.serviceMonitor.scrapeTimeout }}
+  {{- if .Values.hbbr.serviceMonitor.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.hbbr.serviceMonitor.namespaceSelector | nindent 4 }}
+  {{- end }}
+{{- end }}

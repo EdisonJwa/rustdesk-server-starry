@@ -2,6 +2,7 @@ use clap::App;
 mod common;
 mod fast_media_relay;
 mod relay_enrollment;
+mod ops_surface;
 mod relay_server;
 use flexi_logger::*;
 use hbb_common::{config::RELAY_PORT, ResultType};

@@ -97,6 +97,7 @@ pub async fn start_with_bind(
     if let Err(error) = crate::relay_enrollment::preflight(&key) {
         bail!("Relay enrollment preflight failed: {error}");
     }
+    crate::ops_surface::spawn();
     crate::fast_media_relay::spawn(&key);
     if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
         let mut contents = String::new();
@@ -439,6 +440,44 @@ fn is_draining() -> bool {
             .filter(|path| !path.is_empty())
             .map(|path| Path::new(&path).is_file())
             .unwrap_or(false)
+}
+
+/// One consistent view of the counters the operations surface exposes.
+pub(crate) struct OpsSnapshot {
+    pub version: String,
+    pub uptime_seconds: u64,
+    pub active_sessions: u64,
+    pub capacity_sessions: u64,
+    pub active_bandwidth_bps: u64,
+    pub capacity_bandwidth_bps: u64,
+    pub load_basis_points: u64,
+    pub pending_pairs: u64,
+    pub admission_rejections: u64,
+    pub probes_successful: u64,
+    pub probes_rate_limited: u64,
+    pub probes_unsupported: u64,
+    pub probes_malformed: u64,
+    pub telemetry_auth_failures: u64,
+}
+
+pub(crate) fn ops_snapshot() -> OpsSnapshot {
+    let load = current_relay_load();
+    OpsSnapshot {
+        version: starry_version(),
+        uptime_seconds: PROCESS_STARTED.elapsed().as_secs(),
+        active_sessions: u64::from(load.active_sessions),
+        capacity_sessions: u64::from(load.capacity_sessions),
+        active_bandwidth_bps: load.bandwidth_bps,
+        capacity_bandwidth_bps: load.capacity_bandwidth_bps,
+        load_basis_points: u64::from(load.load_basis_points),
+        pending_pairs: PENDING_RELAY_PAIRS.load(Ordering::Relaxed) as u64,
+        admission_rejections: ADMISSION_REJECTIONS.load(Ordering::Relaxed),
+        probes_successful: PROBE_SUCCESSFUL.load(Ordering::Relaxed),
+        probes_rate_limited: PROBE_RATE_LIMITED.load(Ordering::Relaxed),
+        probes_unsupported: PROBE_UNSUPPORTED.load(Ordering::Relaxed),
+        probes_malformed: PROBE_MALFORMED.load(Ordering::Relaxed),
+        telemetry_auth_failures: TELEMETRY_AUTH_FAILURES.load(Ordering::Relaxed),
+    }
 }
 
 fn current_relay_load() -> StarryRelayLoad {
