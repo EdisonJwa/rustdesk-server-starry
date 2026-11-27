@@ -16,6 +16,21 @@
 //! `/healthz` answers `{"status":"ok",...}` with the same version string the
 //! WebSocket capability headers carry. `/metrics` renders Prometheus text
 //! format (version 0.0.4) from the atomics the relay already maintains.
+//!
+//! # Two probes, two questions
+//!
+//! `/healthz` is **liveness**: is this process alive and serving HTTP? It stays
+//! 200 while the relay is draining or full, because the remedy for either is to
+//! leave the process alone. A supervisor that restarted a draining relay would
+//! undo an operator's deliberate action, and one that restarted a full relay
+//! would drop every session on it and change nothing about capacity.
+//!
+//! `/readyz` is **readiness**: would a new relay session be admitted right now?
+//! It answers 503 with the reason when the answer is no, so a load balancer or
+//! a service registry can stop sending peers here while existing sessions keep
+//! running. Its verdict comes from `relay_server::admission_decision`, the same
+//! predicate the data plane uses, so it cannot report "ready" while the peer
+//! path refuses the connection.
 
 use hbb_common::{
     log,
@@ -27,12 +42,13 @@ use hbb_common::{
     },
 };
 use std::{
-    io::Write,
     net::SocketAddr,
     time::Duration,
 };
 
-use crate::relay_server::ops_snapshot;
+use crate::relay_server::{
+    admission_decision, ops_snapshot, Admission, AdmissionBlock, OpsSnapshot,
+};
 
 /// Bytes read from one operations request before giving up.
 const OPS_REQUEST_LIMIT: usize = 8 << 10;
@@ -117,6 +133,10 @@ async fn serve(mut stream: TcpStream) {
             let (status, body) = health_body();
             (status, APPLICATION_JSON, body)
         }
+        "/readyz" => {
+            let (status, body) = ready_body();
+            (status, APPLICATION_JSON, body)
+        }
         "/metrics" => ("200 OK", TEXT_PLAIN, metrics_body()),
         _ => ("404 Not Found", TEXT_PLAIN, "unknown endpoint\n".to_owned()),
     };
@@ -192,17 +212,111 @@ fn request_line(request: &[u8]) -> Option<(String, String)> {
     Some((method.to_owned(), path.to_owned()))
 }
 
+/// The facts a probe body renders, lifted out of the live snapshot.
+///
+/// Exists so the renderers are pure: the tests can then assert both probes
+/// across every admission state without mutating process-wide counters or
+/// environment variables, which is the only way to cover "draining" and "full"
+/// in one test binary.
+#[derive(Clone, Debug)]
+struct ProbeView {
+    version: String,
+    uptime_seconds: u64,
+    active_sessions: u64,
+    capacity_sessions: u64,
+    admission_rejections: u64,
+    admission: Admission,
+}
+
+impl ProbeView {
+    fn from_snapshot(snapshot: &OpsSnapshot) -> Self {
+        // Re-derive from the live counters so the view carries the verdict the
+        // data plane would reach, not a second opinion.
+        let admission = admission_decision(
+            snapshot.draining,
+            snapshot.active_sessions as usize,
+            snapshot.capacity_sessions as usize,
+        );
+        Self {
+            version: snapshot.version.clone(),
+            uptime_seconds: snapshot.uptime_seconds,
+            active_sessions: snapshot.active_sessions,
+            capacity_sessions: snapshot.capacity_sessions,
+            admission_rejections: snapshot.admission_rejections,
+            admission,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(active: u64, capacity: u64, draining: bool) -> Self {
+        Self {
+            version: "test-patch-v0".to_owned(),
+            uptime_seconds: 1,
+            active_sessions: active,
+            capacity_sessions: capacity,
+            admission_rejections: 0,
+            admission: admission_decision(draining, active as usize, capacity as usize),
+        }
+    }
+}
+
 /// Machine-readable liveness and version report.
+///
+/// Always 200: the process answering this request is, by definition, able to
+/// serve HTTP. Whether it can take new sessions is `/readyz`'s question, and
+/// conflating the two is what makes a supervisor restart a healthy relay.
 fn health_body() -> (&'static str, String) {
-    let snapshot = ops_snapshot();
+    render_health(&ProbeView::from_snapshot(&ops_snapshot()))
+}
+
+fn render_health(view: &ProbeView) -> (&'static str, String) {
     (
         "200 OK",
         format!(
             "{{\"status\":\"ok\",\"version\":\"{}\",\"uptime_seconds\":{},\
-             \"admission_rejections\":{}}}",
-            snapshot.version, snapshot.uptime_seconds, snapshot.admission_rejections
+             \"admission_rejections\":{},\"draining\":{},\"admission_open\":{}}}",
+            view.version,
+            view.uptime_seconds,
+            view.admission_rejections,
+            matches!(view.admission, Admission::Blocked(AdmissionBlock::Draining)),
+            view.admission.is_open()
         ),
     )
+}
+
+/// Readiness report: would a new relay session be admitted?
+///
+/// 503 carries the reason so an operator does not have to correlate a load
+/// metric to understand why the relay is out of rotation.
+fn ready_body() -> (&'static str, String) {
+    render_ready(&ProbeView::from_snapshot(&ops_snapshot()))
+}
+
+fn render_ready(view: &ProbeView) -> (&'static str, String) {
+    match view.admission {
+        Admission::Open => (
+            "200 OK",
+            format!(
+                "{{\"status\":\"ready\",\"version\":\"{}\",\"active_sessions\":{},\
+                 \"capacity_sessions\":{}}}",
+                view.version, view.active_sessions, view.capacity_sessions
+            ),
+        ),
+        Admission::Blocked(block) => {
+            let reason = match block {
+                AdmissionBlock::Draining => "draining",
+                AdmissionBlock::AtCapacity => "at_capacity",
+            };
+            (
+                "503 Service Unavailable",
+                format!(
+                    "{{\"status\":\"not_ready\",\"reason\":\"{reason}\",\"version\":\"{}\",\
+                     \"active_sessions\":{},\"capacity_sessions\":{}}}",
+                    view.version, view.active_sessions, view.capacity_sessions
+                ),
+            )
+        }
+    }
 }
 
 /// Renders the Prometheus text exposition of the relay's live state.
@@ -350,5 +464,87 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["status"], "ok");
         assert!(parsed["version"].as_str().unwrap().contains("-patch-v"));
+    }
+
+    /// Liveness must not depend on admission.
+    ///
+    /// This is the whole point of the split: a relay that is draining or full is
+    /// still alive, and restarting it would either undo an operator's decision
+    /// or drop live sessions without adding capacity.
+    #[test]
+    fn healthz_reports_ok_regardless_of_admission() {
+        for draining in [false, true] {
+            for (active, capacity) in [(0u64, 4u64), (4, 4), (9, 4)] {
+                let view = ProbeView::for_test(active, capacity, draining);
+                let (status, body) = render_health(&view);
+                assert_eq!(status, "200 OK", "draining={draining} {active}/{capacity}");
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(parsed["status"], "ok");
+                assert_eq!(parsed["draining"], draining);
+                assert_eq!(parsed["admission_open"], view.admission.is_open());
+            }
+        }
+    }
+
+    #[test]
+    fn readyz_answers_for_every_admission_state() {
+        let ready = ProbeView::for_test(2, 4, false);
+        let (status, body) = render_ready(&ready);
+        assert_eq!(status, "200 OK");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"], "ready");
+
+        let full = ProbeView::for_test(4, 4, false);
+        let (status, body) = render_ready(&full);
+        assert_eq!(status, "503 Service Unavailable");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], "not_ready");
+        assert_eq!(parsed["reason"], "at_capacity");
+
+        let draining = ProbeView::for_test(1, 4, true);
+        let (status, body) = render_ready(&draining);
+        assert_eq!(status, "503 Service Unavailable");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["reason"],
+            "draining"
+        );
+    }
+
+    #[test]
+    fn admission_decision_covers_every_state() {
+        assert!(admission_decision(false, 0, 4).is_open());
+        assert!(admission_decision(false, 3, 4).is_open());
+        assert_eq!(
+            admission_decision(false, 4, 4),
+            Admission::Blocked(AdmissionBlock::AtCapacity),
+            "the last free slot is the one that admits"
+        );
+        assert_eq!(
+            admission_decision(false, 5, 4),
+            Admission::Blocked(AdmissionBlock::AtCapacity)
+        );
+        assert_eq!(
+            admission_decision(true, 0, 4),
+            Admission::Blocked(AdmissionBlock::Draining)
+        );
+        // Draining outranks capacity: an operator who drained a busy relay needs
+        // to see their own action, not a capacity symptom they cannot act on.
+        assert_eq!(
+            admission_decision(true, 9, 4),
+            Admission::Blocked(AdmissionBlock::Draining)
+        );
+    }
+
+    /// A configured capacity of zero is clamped to one, matching the data plane.
+    ///
+    /// `STARRY_RELAY_MAX_SESSIONS` refuses a zero value at startup, so this only
+    /// documents what the shared predicate does if it ever sees one: capacity is
+    /// floored at a single session rather than blocking every peer outright.
+    #[test]
+    fn zero_capacity_is_floored_to_one_session() {
+        assert!(admission_decision(false, 0, 0).is_open());
+        assert_eq!(
+            admission_decision(false, 1, 0),
+            Admission::Blocked(AdmissionBlock::AtCapacity)
+        );
     }
 }

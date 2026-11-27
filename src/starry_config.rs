@@ -2791,4 +2791,20 @@ connection_auth:
         assert_eq!(runtime_state().subsystem_acks, ack.subsystem_acks);
         let _ = fs::remove_dir_all(directory);
     }
+
+    /// The telemetry fallback must match this module's default.
+    ///
+    /// This lives here rather than in `telemetry` because it needs symbols from
+    /// both modules: `telemetry` carries no configuration graph so that HBBR can
+    /// compile it, which means asserting this from there breaks
+    /// `cargo test --bin hbbr`. If the two values diverge, a deployment that adds
+    /// a Starry config without `max_telemetry_age_seconds` silently changes its
+    /// staleness bound.
+    #[test]
+    fn telemetry_fallback_matches_the_config_default() {
+        assert_eq!(
+            crate::telemetry::DEFAULT_MAX_AGE_SECONDS,
+            RelayQualityConfig::default().max_telemetry_age_seconds
+        );
+    }
 }

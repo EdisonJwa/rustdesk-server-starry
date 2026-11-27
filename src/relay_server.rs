@@ -458,10 +458,30 @@ pub(crate) struct OpsSnapshot {
     pub probes_unsupported: u64,
     pub probes_malformed: u64,
     pub telemetry_auth_failures: u64,
+    /// Whether the operator asked this relay to stop taking sessions.
+    ///
+    /// Distinct from capacity: draining is a decision, a full relay is a
+    /// consequence, and an operator reading `/readyz` needs to tell them apart.
+    pub draining: bool,
+    /// Whether a new relay session would be admitted right now.
+    ///
+    /// This is the same predicate the data plane applies in
+    /// `admission_available`, sampled once so the answer the probe reports is
+    /// the answer a peer would get.
+    pub admission_open: bool,
 }
 
 pub(crate) fn ops_snapshot() -> OpsSnapshot {
     let load = current_relay_load();
+    let draining = is_draining();
+    // Read the live counters rather than the clamped `load` view: capacity is
+    // clamped to at least 1 for display, while admission must see the value the
+    // data plane compares against.
+    let admission = admission_decision(
+        draining,
+        ACTIVE_RELAY_SESSIONS.load(Ordering::Relaxed),
+        MAX_RELAY_SESSIONS.load(Ordering::Relaxed),
+    );
     OpsSnapshot {
         version: starry_version(),
         uptime_seconds: PROCESS_STARTED.elapsed().as_secs(),
@@ -477,6 +497,8 @@ pub(crate) fn ops_snapshot() -> OpsSnapshot {
         probes_unsupported: PROBE_UNSUPPORTED.load(Ordering::Relaxed),
         probes_malformed: PROBE_MALFORMED.load(Ordering::Relaxed),
         telemetry_auth_failures: TELEMETRY_AUTH_FAILURES.load(Ordering::Relaxed),
+        draining,
+        admission_open: admission.is_open(),
     }
 }
 
@@ -607,9 +629,53 @@ fn atomic_saturating_sub(value: &AtomicUsize, amount: usize) {
 }
 
 fn admission_available() -> bool {
-    !is_draining()
-        && ACTIVE_RELAY_SESSIONS.load(Ordering::SeqCst)
-            < MAX_RELAY_SESSIONS.load(Ordering::SeqCst).max(1)
+    admission_decision(
+        is_draining(),
+        ACTIVE_RELAY_SESSIONS.load(Ordering::SeqCst),
+        MAX_RELAY_SESSIONS.load(Ordering::SeqCst),
+    )
+    .is_open()
+}
+
+/// Why a new relay session would be refused, if it would be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionBlock {
+    /// The operator set `STARRY_RELAY_DRAINING` or created the draining file.
+    Draining,
+    /// Every session slot is taken.
+    AtCapacity,
+}
+
+/// The single admission predicate, shared by the data plane and `/readyz`.
+///
+/// Both callers must ask the same question: a readiness probe that answered
+/// "accepting" while `RelayLoadGuard::try_new` refused a peer would send traffic
+/// to a relay that drops it. Keeping the arithmetic here — with the values
+/// passed in rather than read from globals — is what lets the tests cover the
+/// four combinations without mutating process state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Admission {
+    Open,
+    Blocked(AdmissionBlock),
+}
+
+impl Admission {
+    pub(crate) fn is_open(self) -> bool {
+        matches!(self, Admission::Open)
+    }
+}
+
+pub(crate) fn admission_decision(draining: bool, active: usize, capacity: usize) -> Admission {
+    if draining {
+        // Draining wins over capacity: an operator draining a busy relay wants
+        // to see "draining", not "full", because only one of those is a
+        // capacity problem they might try to fix by waiting.
+        return Admission::Blocked(AdmissionBlock::Draining);
+    }
+    if active >= capacity.max(1) {
+        return Admission::Blocked(AdmissionBlock::AtCapacity);
+    }
+    Admission::Open
 }
 
 struct RelayLoadGuard {

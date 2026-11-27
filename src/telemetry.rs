@@ -40,13 +40,8 @@ mod tests {
         assert_eq!(SCHEMA_VERSION, 2);
     }
 
-    #[test]
-    fn the_fallback_matches_the_config_default() {
-        // If these ever diverge, a deployment that adds a Starry config without
-        // the field would silently change its staleness bound.
-        assert_eq!(
-            DEFAULT_MAX_AGE_SECONDS,
-            crate::starry_config::RelayQualityConfig::default().max_telemetry_age_seconds
-        );
-    }
+    // The "fallback matches the config default" check lives in
+    // `starry_config`'s tests, not here: it needs both symbols, and this module
+    // deliberately has no configuration graph so HBBR can compile it. Asserting
+    // it here would make `cargo test --bin hbbr` fail to compile.
 }

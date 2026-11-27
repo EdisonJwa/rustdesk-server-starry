@@ -13,8 +13,12 @@ Next steps:
 {{- if .Values.hbbr.operations.enabled }}
 
 Supervision:
-- HBBR answers `GET {{ .Values.hbbr.operations.listen }}/healthz` and `/metrics`
-  on the node. Keep it on loopback.
+- HBBR answers `GET {{ .Values.hbbr.operations.listen }}/healthz` (liveness),
+  `/readyz` (readiness) and `/metrics` on the node. Keep it on loopback.
+- Point a load balancer or service registry at `/readyz`, never `/healthz`:
+  `/readyz` returns 503 while the relay is draining or at capacity, which is
+  when new sessions must stop arriving. `/healthz` stays 200 in those states on
+  purpose, so a supervisor does not restart a relay that is working correctly.
 {{- if .Values.hbbr.serviceMonitor.enabled }}
 - The ServiceMonitor scrapes `/metrics` every {{ .Values.hbbr.serviceMonitor.interval }}.
 {{- else }}

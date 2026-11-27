@@ -172,6 +172,9 @@ spec:
           livenessProbe:
             {{- toYaml .Values.hbbr.livenessProbe | nindent 12 }}
             {{- if .Values.hbbr.operations.enabled }}
+            # Liveness asks only whether the process still serves HTTP. A relay
+            # that is draining or full must not be restarted: that would undo an
+            # operator's decision or drop live sessions without adding capacity.
             httpGet:
               path: /healthz
               host: {{ include "starry.opsHost" . }}
@@ -183,8 +186,11 @@ spec:
           readinessProbe:
             {{- toYaml .Values.hbbr.readinessProbe | nindent 12 }}
             {{- if .Values.hbbr.operations.enabled }}
+            # Readiness asks whether a new relay session would be admitted, so it
+            # must be /readyz: 503 while draining or at capacity takes this pod
+            # out of rotation while its existing sessions keep running.
             httpGet:
-              path: /healthz
+              path: /readyz
               host: {{ include "starry.opsHost" . }}
               port: {{ include "starry.opsPort" . }}
             {{- else }}

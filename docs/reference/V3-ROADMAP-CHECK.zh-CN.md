@@ -31,7 +31,7 @@ CRLF 工作树里打不上，属 Windows 检出产物；CI 在 Linux runner 上�
 | 2 | `default_group` 分支不继承 `deny` / `require_scope` | **已修。** 默认组现在按真实分组解析，未命中规则的设备继承其判定。原先只读组名，把"默认拒绝"的文档变成了全放行。 |
 | 3 | 认证关闭时 `require_scope` 不强制，Audit 下仅记录 | **仍成立，且是设计如此。** 兼容模式不强制身份；组 scope 只在连接认证评估 token 时约束。已作为"兼容 / 受管"分工记录，而非"修复"。 |
 | 4 | 策略拒绝绕过结构化审计；CSV 缺 `group` | **已修。** `audit_log::record_strategy_denial()` 记录 verdict `deny` 并带上组名，CSV 导出包含文档已描述的 `group` 列。 |
-| 5 | HBBR `/healthz` 恒返回 200，无法证明可接受新连接 | **仍成立。** 本次未处理。 |
+| 5 | HBBR `/healthz` 恒返回 200，无法证明可接受新连接 | **已修，做法是拆分探针而非改动它。** `/healthz` 保持 200 是刻意的——它回答存活，而重启一台排水或满载的中继只会掐掉会话、一个槽位也不多。新增的 `/readyz` 回答准入，在排水或满载时返回 503 并带 `reason`。两者都调用 `relay_server::admission_decision`，因此探针不可能在数据面拒绝连接时报告 "ready"。见 [RELAY-OPS-SURFACE](RELAY-OPS-SURFACE.zh-CN.md)。 |
 | 6 | 官方 `RequestRelay` 可能沿用旧地址；不得在一端已连接后重新分配 | **部分处理，症状不同。** `7290f29` 修的是：客户端留空中继时服务端从不填地址（fast_relay 关闭时，文档推荐的空中继配置根本无法连接）。"一端连接后不得重新分配"这条不变量仍待验证。 |
 | 7 | Auth Server V1 文档用 `user_info` / `current-user`，与客户端契约不符 | **已修。** 实现与双语文档现使用 `user`、`POST /api/currentUser`、`login-options` 返回 JSON 数组，并把登录返回的 `access_token` 本身当作连接凭据。 |
 | 8 | `relay_observer`、控制 API、配置 schema 与遥测对归档扩展存在交叉依赖 | **仍成立。** 直接删模块会如路线图所警告的那样破坏可用的通用功能。 |
@@ -39,8 +39,8 @@ CRLF 工作树里打不上，属 Windows 检出产物；CI 在 Linux runner 上�
 
 ## 对规划的含义
 
-在定基线时就有两项已过期（7 在定基线前就修好了；1、2、4 与 CI 阻塞现在已修）。
-第 3、5、8、9 条确实仍未解决，第 6 条半解决且失败模式与路线图预判不同。
+在定基线时就有两项已过期（7 在定基线前就修好了；1、2、4、CI 阻塞与第 5 条现已修）。
+第 3、8、9 条确实仍未解决，第 6 条半解决且失败模式与路线图预判不同。
 
 路线图基线应在下次规划前移到 `27dab9f`，FND-01/FND-02 可连同提交里点名的测试
 一起标记为完成。
@@ -53,6 +53,7 @@ CRLF 工作树里打不上，属 Windows 检出产物；CI 在 Linux runner 上�
 | 启动 fail-closed | `src/strategy.rs` 针对文档损坏与未配置的单测；另在生产二进制上确认 |
 | 拒绝进审计 | `AuditEvent` 形状单测；e2e 断言已注册目标被策略分支拒绝（回退审计调用会让它失败） |
 | 留空中继获得地址 | `tests/relay_selection.rs` 配真实 hbbr；回退即以生产症状失败 |
+| 就绪与存活分离 | `src/ops_surface.rs` 针对纯函数 `admission_decision` 的单测；让容量永不阻塞会使其中三条失败，而存活测试仍通过 |
 | vendor fixtures | 本地复现 CI 步骤，差异计数为 0 |
 
 审计 writer 是进程级 `OnceLock`，因此同一测试二进制里不能由多个测试断言审计输出：
