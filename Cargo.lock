@@ -1360,11 +1360,9 @@ dependencies = [
  "clap 3.2.25",
  "dns-lookup",
  "ed25519",
- "flate2",
  "flexi_logger",
  "fs2",
  "hbb_common",
- "headers",
  "http 1.5.0",
  "hyper 0.14.32",
  "ipnetwork 0.20.0",
@@ -1372,14 +1370,11 @@ dependencies = [
  "lazy_static",
  "libc",
  "local-ip-address",
- "mac_address",
  "machine-uid",
  "maxminddb",
  "minreq",
  "once_cell",
- "ping",
  "rcgen",
- "regex",
  "reqwest",
  "rust-ini",
  "rustls",
@@ -1387,6 +1382,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "serde_norway",
+ "sha1",
  "sha2",
  "sodiumoxide",
  "tempfile",
@@ -1394,11 +1390,9 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tower 0.4.13",
- "tower-http 0.3.3",
  "tungstenite",
  "url",
  "uuid",
- "whoami",
  "x509-parser",
 ]
 
@@ -2121,16 +2115,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a60c7ce501c71e03a9c9c0d35b861413ae925bd979cc7a4e30d060069aaac8d"
 
 [[package]]
-name = "mime_guess"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4192263c238a5f0d0c6bfd21f336a313a4ce1c450542449ca191bb657b4642ef"
-dependencies = [
- "mime",
- "unicase",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2491,17 +2475,6 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
-
-[[package]]
-name = "ping"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69044d1c00894fc1f43d9485aadb6ab6e68df90608fa52cf1074cda6420c6b76"
-dependencies = [
- "rand 0.8.8",
- "socket2 0.4.4",
- "thiserror 1.0.31",
-]
 
 [[package]]
 name = "pkcs8"
@@ -3889,17 +3862,10 @@ dependencies = [
  "http 0.2.7",
  "http-body 0.4.6",
  "http-range-header",
- "httpdate",
- "mime",
- "mime_guess",
- "percent-encoding",
  "pin-project-lite",
- "tokio",
- "tokio-util",
  "tower 0.4.13",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -4021,12 +3987,6 @@ name = "typenum"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
-
-[[package]]
-name = "unicase"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"

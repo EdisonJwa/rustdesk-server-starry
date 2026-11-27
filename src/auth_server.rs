@@ -402,6 +402,111 @@ create table if not exists oidc_links (
     primary key (provider, subject)
 );
 create index if not exists oidc_links_user on oidc_links (user_id);
+-- ---------------------------------------------------------------------------
+-- Non-legacy address books.
+--
+-- The legacy shape is one opaque document per account (`address_books`). The
+-- structured shape the client also understands is several named books per
+-- account plus per-peer rows, which is what makes sharing and pagination
+-- possible. Both are kept: the client picks based on whether
+-- `POST /api/ab/personal` answers 200 or 404, and a deployment may legitimately
+-- serve legacy only.
+create table if not exists ab_books (
+    guid text primary key,
+    owner_id integer not null,
+    name text not null,
+    note text not null default '',
+    -- ShareRule: 1 read, 2 read/write, 3 full control.
+    rule integer not null default 3,
+    personal integer not null default 1,
+    created_at integer not null,
+    updated_at integer not null
+);
+create index if not exists ab_books_owner on ab_books (owner_id);
+create table if not exists ab_peers (
+    guid text not null,
+    peer_id text not null,
+    hash text not null default '',
+    password text not null default '',
+    username text not null default '',
+    hostname text not null default '',
+    platform text not null default '',
+    alias text not null default '',
+    -- JSON array of tag names. A peer's tags are a set owned by the peer row,
+    -- so no join table is needed for the client's shape.
+    tags text not null default '[]',
+    force_always_relay integer not null default 0,
+    rdp_port text not null default '',
+    rdp_username text not null default '',
+    login_name text not null default '',
+    device_group_name text not null default '',
+    note text not null default '',
+    updated_at integer not null,
+    primary key (guid, peer_id)
+);
+create index if not exists ab_peers_guid on ab_peers (guid);
+create table if not exists ab_tags (
+    guid text not null,
+    name text not null,
+    -- Client-side ARGB integer, stored as given. The server never interprets it.
+    color integer not null default 0,
+    primary key (guid, name)
+);
+-- ---------------------------------------------------------------------------
+-- Device groups.
+create table if not exists device_groups (
+    name text primary key,
+    created_at integer not null
+);
+create table if not exists device_group_members (
+    group_name text not null,
+    user_id integer not null,
+    primary key (group_name, user_id)
+);
+-- ---------------------------------------------------------------------------
+-- TOTP second factor.
+create table if not exists user_totp (
+    user_id integer primary key,
+    -- Base32 secret, sealed with the API signing key's filesystem protection.
+    -- The claim is only usable while the row exists.
+    secret text not null,
+    confirmed_at integer,
+    last_used_step integer not null default 0,
+    created_at integer not null
+);
+-- ---------------------------------------------------------------------------
+-- Device enrolment tokens (`/api/devices/deploy`).
+create table if not exists deploy_tokens (
+    token_hash text primary key,
+    created_by integer not null,
+    created_at integer not null,
+    expires_at integer not null,
+    used_at integer,
+    used_peer text not null default ''
+);
+-- ---------------------------------------------------------------------------
+-- Heartbeats: device presence, and the strategy the server hands back.
+create table if not exists device_presence (
+    peer_id text primary key,
+    uuid text not null default '',
+    version text not null default '',
+    connections text not null default '[]',
+    user_id integer,
+    first_seen integer not null,
+    last_seen integer not null
+);
+create table if not exists client_strategies (
+    -- One row per user is enough: the client sends `modified_at` so an
+    -- unchanged document is not re-delivered.
+    user_id integer primary key,
+    document text not null,
+    modified_at integer not null
+);
+-- Pending `disconnect` instructions, drained by the next heartbeat.
+create table if not exists disconnect_requests (
+    peer_id text primary key,
+    created_at integer not null
+);
 ";
 
 #[derive(Clone, Debug)]
@@ -721,7 +826,7 @@ fn mint_token(request: TokenRequest<'_>) -> Result<(String, String), String> {
 // State
 // ---------------------------------------------------------------------------
 
-struct ApiState {
+pub(crate) struct ApiState {
     db: Connection,
     key: Arc<SigningKey>,
     config: ApiConfig,
@@ -1091,6 +1196,116 @@ impl ApiState {
         Ok((claims, user))
     }
 
+    /// Authenticates a request from its `Authorization: Bearer` header.
+    ///
+    /// Every endpoint that needs the caller repeats this, so it lives here
+    /// rather than being open-coded per handler; a handler that forgets the
+    /// bearer prefix would otherwise fail in a way that looks like a bad token.
+    /// The authenticated account id, which is all the sibling modules need.
+    ///
+    /// Returning the id rather than `User` keeps the account struct private to
+    /// this module: the address book and enforcement handlers should not be able
+    /// to read a password hash just because they resolved an identity.
+    pub(crate) async fn authenticate_headers(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<i64, AuthFailure> {
+        let token = bearer(headers).ok_or(AuthFailure::Unauthorized)?;
+        let (_, user) = self.authenticate(&token).await?;
+        Ok(user.id)
+    }
+
+    /// The stored Base32 TOTP secret, if the account has a second factor.
+    pub(crate) async fn totp_secret(&self, user_id: i64) -> Result<Option<String>, String> {
+        self.db_call(move |connection| {
+            let secret = connection
+                .query_row(
+                    "select secret from user_totp where user_id = ?1",
+                    [user_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            Ok::<_, rusqlite::Error>(secret)
+        })
+        .await
+    }
+
+    /// The last TOTP time step this account spent, or 0 if none.
+    pub(crate) async fn totp_last_step(&self, user_id: i64) -> Result<u64, String> {
+        self.db_call(move |connection| {
+            let step = connection
+                .query_row(
+                    "select last_used_step from user_totp where user_id = ?1",
+                    [user_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            Ok::<_, rusqlite::Error>(step.max(0) as u64)
+        })
+        .await
+    }
+
+    /// Marks a time step as spent. Only moves forward.
+    pub(crate) async fn totp_consume_step(&self, user_id: i64, step: u64) -> Result<(), String> {
+        self.db_call(move |connection| {
+            connection.execute(
+                "update user_totp set last_used_step = max(last_used_step, ?2)
+                 where user_id = ?1",
+                rusqlite::params![user_id, step as i64],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+    }
+
+    /// Enrols or replaces an account's TOTP secret. Not confirmed until the
+    /// caller proves it can generate a code.
+    pub(crate) async fn totp_set_secret(&self, user_id: i64, secret: &str) -> Result<(), String> {
+        let secret = secret.to_owned();
+        self.db_call(move |connection| {
+            let now = epoch_seconds() as i64;
+            connection.execute(
+                "insert into user_totp (user_id, secret, last_used_step, created_at)
+                 values (?1, ?2, 0, ?3)
+                 on conflict(user_id) do update set secret = excluded.secret,
+                                                 confirmed_at = null,
+                                                 last_used_step = 0",
+                rusqlite::params![user_id, secret, now],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+    }
+
+    /// Whether an account is an administrator.
+    pub(crate) async fn is_admin(&self, user_id: i64) -> Result<bool, String> {
+        self.user_by_id(user_id)
+            .await?
+            .map(|user| user.is_admin)
+            .ok_or_else(|| format!("account {user_id} disappeared"))
+    }
+
+    /// The account name for an id, used to fill `owner` in address book rows.
+    pub(crate) async fn user_name(&self, user_id: i64) -> Result<String, String> {
+        self.user_by_id(user_id)
+            .await?
+            .map(|user| user.name)
+            .ok_or_else(|| format!("account {user_id} disappeared"))
+    }
+
+    /// Runs a closure on the blocking SQLite connection.
+    ///
+    /// `tokio_rusqlite::Connection::call` is already async; this wrapper exists
+    /// only so the new modules do not each have to import the type and reason
+    /// about the error mapping.
+    pub(crate) async fn db_call<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R, rusqlite::Error> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.db.call(f).await.map_err(|err| err.to_string())
+    }
+
     fn verify_local(&self, token: &str) -> Result<Claims, AuthFailure> {
         if token.is_empty() || token.len() > 8_192 {
             return Err(AuthFailure::Unauthorized);
@@ -1137,7 +1352,7 @@ enum Verdict {
     Inactive(&'static str),
 }
 
-enum AuthFailure {
+pub(crate) enum AuthFailure {
     Unauthorized,
     Unavailable,
 }
@@ -1158,6 +1373,45 @@ fn router(state: Arc<ApiState>) -> Router {
         // The client GETs to pull and POSTs to push the same opaque document.
         // A literal `null` means "no address book" and is a normal answer.
         .route("/api/ab", get(address_book).post(address_book_push))
+        // Structured address books. The client POSTs /api/ab/personal first and
+        // falls back to the legacy single document only if that answers 404, so
+        // these must all exist together or the feature stays dark.
+        .route("/api/ab/personal", post(crate::address_book::personal))
+        .route("/api/ab/settings", post(crate::address_book::settings))
+        .route(
+            "/api/ab/shared/profiles",
+            post(crate::address_book::shared_profiles),
+        )
+        .route("/api/ab/peers", post(crate::address_book::peers))
+        .route("/api/ab/tags/:guid", post(crate::address_book::tags))
+        .route("/api/ab/peer/add/:guid", post(crate::address_book::peer_add))
+        .route(
+            "/api/ab/peer/update/:guid",
+            axum::routing::put(crate::address_book::peer_update),
+        )
+        .route(
+            "/api/ab/peer/:guid",
+            axum::routing::delete(crate::address_book::peer_delete),
+        )
+        .route("/api/ab/tag/add/:guid", post(crate::address_book::tag_add))
+        .route(
+            "/api/ab/tag/rename/:guid",
+            axum::routing::put(crate::address_book::tag_rename),
+        )
+        .route(
+            "/api/ab/tag/update/:guid",
+            axum::routing::put(crate::address_book::tag_update),
+        )
+        .route(
+            "/api/ab/tag/:guid",
+            axum::routing::delete(crate::address_book::tag_delete),
+        )
+        .route(
+            "/api/device-group/accessible",
+            get(crate::directory::device_groups),
+        )
+        .route("/api/users", get(crate::directory::users))
+        .route("/api/peers", get(crate::directory::peers))
         // OIDC: the client starts a login, then polls for its result. The
         // browser half lands on /oidc/callback, which the IdP redirects to.
         .route("/api/oidc/auth", post(oidc_auth_start))
@@ -1192,6 +1446,20 @@ struct LoginRequest {
     uuid: String,
     #[serde(rename = "type")]
     login_type: String,
+    /// Second step only: the handle issued by the first step.
+    #[serde(default)]
+    secret: String,
+    /// Second step only. The client sends this field and `tfa_code` with the
+    /// same value, and has sent both a string and a number for it.
+    #[serde(default, deserialize_with = "crate::totp::flexible_code")]
+    verification_code: String,
+    #[serde(default, deserialize_with = "crate::totp::flexible_code")]
+    tfa_code: String,
+    /// Device binding, kept for parity with the login payload.
+    #[serde(default)]
+    device_info: serde_json::Value,
+    #[serde(default)]
+    auto_login: bool,
 }
 
 async fn login(
@@ -1208,9 +1476,19 @@ async fn login(
         Ok(request) => request,
         Err(response) => return response,
     };
-    // Only password login is supported; anything else (SMS/e-mail codes) must
-    // say so instead of silently failing the password check.
-    if !request.login_type.is_empty() && request.login_type != "account" {
+    // Two request types reach this endpoint:
+    //
+    // * `account` (and empty) is the first step: a password check;
+    // * `email_code` is the second step of a two-factor login, which the client
+    //   sends with the `secret` from step one and the code the user typed. It
+    //   carries the same username and password.
+    //
+    // Anything else is refused rather than silently treated as a password login.
+    let is_second_step = request.login_type == "email_code";
+    if !request.login_type.is_empty()
+        && request.login_type != "account"
+        && !is_second_step
+    {
         return api_error(StatusCode::BAD_REQUEST, "UnsupportedLoginType");
     }
     let username = request.username.trim().to_owned();
@@ -1238,48 +1516,16 @@ async fn login(
         return api_error(StatusCode::FORBIDDEN, "UserDisabled");
     }
 
-    let scope = token_scope(&state.config.base_scope, &user.extra_scopes);
-    let ttl = state.config.token_ttl_seconds;
-    let (token, jti) = match mint_token(TokenRequest {
-        key: &state.key,
-        issuer: &state.config.issuer,
-        audience: &state.config.audience,
-        user_id: user.id,
-        auth_version: user.auth_version,
-        scope: &scope,
-        ttl_seconds: ttl,
-    }) {
-        Ok(token) => token,
-        Err(err) => {
-            log::error!("cannot mint login token: {err}");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
-        }
-    };
-    if let Err(err) = state
-        .insert_session(
-            jti,
-            user.id,
-            user.auth_version,
-            epoch_seconds().saturating_add(ttl),
-            client_ip.to_string(),
-            request.id,
-            request.uuid,
-        )
-        .await
-    {
-        log::error!("cannot record session: {err}");
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+    if is_second_step {
+        return finish_totp_login(state, user, request, client_ip).await;
     }
+    if let Some(response) = begin_totp_challenge(&state, &user, client_ip).await {
+        return response;
+    }
+
     state.record_login_success(client_ip);
     log::info!("API login accepted for {} from {}", user.name, client_ip);
-    Json(json!({
-        "access_token": token,
-        "type": "access_token",
-        "tfa_type": "",
-        "secret": "",
-        "user": user_payload(&user),
-    }))
-    .into_response()
+    issue_access_token(state, user, request, client_ip).await
 }
 
 async fn current_user(
@@ -1360,6 +1606,170 @@ async fn connection_token(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
     }
     Json(json!({"token": jwt, "expires_in": ttl})).into_response()
+}
+
+/// Answers step one when the account has a second factor configured.
+///
+/// `Some(response)` means "stop, this login needs a code"; `None` means the
+/// account has no TOTP row and the password login may complete.
+///
+/// The response deliberately carries `type: "email_code"` and
+/// `tfa_type: "tfa_check"`: that pair is what makes the client show its
+/// verification dialog and post again. It carries no access token.
+async fn begin_totp_challenge(
+    state: &Arc<ApiState>,
+    user: &User,
+    client_ip: IpAddr,
+) -> Option<Response> {
+    let has_totp = match state.totp_secret(user.id).await {
+        Ok(secret) => secret.is_some(),
+        Err(err) => {
+            // Fail closed: if we cannot tell whether a second factor is
+            // required, do not hand out a credential.
+            log::error!("cannot read TOTP state: {err}");
+            return Some(api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError"));
+        }
+    };
+    if !has_totp {
+        return None;
+    }
+    let secret = crate::totp::issue_challenge(user.id, crate::totp::now_seconds());
+    log::info!(
+        "API login awaiting TOTP code for {} from {}",
+        user.name,
+        client_ip
+    );
+    Some(
+        Json(json!({
+            "access_token": "",
+            "type": "email_code",
+            "tfa_type": "tfa_check",
+            "secret": secret,
+            "user": user_payload(user),
+        }))
+        .into_response(),
+    )
+}
+
+/// Completes a two-factor login.
+async fn finish_totp_login(
+    state: Arc<ApiState>,
+    user: User,
+    request: LoginRequest,
+    client_ip: IpAddr,
+) -> Response {
+    let now = crate::totp::now_seconds();
+    // Expiry, forgery and account binding are all checked by this call: the
+    // handle cannot be replayed against another account even with a valid code.
+    if !crate::totp::read_challenge_for(&request.secret, user.id, now) {
+        crate::totp::log_rejection("expired_forged_or_foreign_challenge");
+        state.record_login_failure(client_ip);
+        return api_error(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+    let stored = match state.totp_secret(user.id).await {
+        Ok(Some(secret)) => secret,
+        Ok(None) => {
+            // The row disappeared between the two steps: refuse rather than
+            // treat it as "second factor removed".
+            crate::totp::log_rejection("no_secret");
+            return api_error(StatusCode::UNAUTHORIZED, "Unauthorized");
+        }
+        Err(err) => {
+            log::error!("cannot read TOTP secret: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+    let secret_bytes = match crate::totp::decode_base32(&stored) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::error!("stored TOTP secret is not Base32: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+    let last_used = match state.totp_last_step(user.id).await {
+        Ok(step) => step,
+        Err(err) => {
+            log::error!("cannot read TOTP replay state: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+    let submitted = if request.verification_code.is_empty() {
+        request.tfa_code.as_str()
+    } else {
+        request.verification_code.as_str()
+    };
+    let verdict = crate::totp::check_code(
+        &secret_bytes,
+        submitted,
+        crate::totp::step_at(now),
+        last_used,
+    );
+    if let crate::totp::TotpVerdict::Accepted { step } = verdict {
+        // Record the consumed step before issuing anything, so a crash cannot
+        // let the same code be used twice.
+        if let Err(err) = state.totp_consume_step(user.id, step).await {
+            log::error!("cannot record TOTP step: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+        state.record_login_success(client_ip);
+        log::info!("API login completed with TOTP for {}", user.name);
+        return issue_access_token(state, user, request, client_ip).await;
+    }
+    crate::totp::log_rejection(crate::totp::describe(&verdict));
+    state.record_login_failure(client_ip);
+    api_error(StatusCode::UNAUTHORIZED, "UsernameOrPasswordError")
+}
+
+/// Mints and records the session for a completed login.
+///
+/// Shared by the password path and the two-factor path so the two cannot drift
+/// apart in the claims they carry.
+async fn issue_access_token(
+    state: Arc<ApiState>,
+    user: User,
+    request: LoginRequest,
+    client_ip: IpAddr,
+) -> Response {
+    let scope = token_scope(&state.config.base_scope, &user.extra_scopes);
+    let ttl = state.config.token_ttl_seconds;
+    let (token, jti) = match mint_token(TokenRequest {
+        key: &state.key,
+        issuer: &state.config.issuer,
+        audience: &state.config.audience,
+        user_id: user.id,
+        auth_version: user.auth_version,
+        scope: &scope,
+        ttl_seconds: ttl,
+    }) {
+        Ok(minted) => minted,
+        Err(err) => {
+            log::error!("cannot mint login token: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+    if let Err(err) = state
+        .insert_session(
+            jti,
+            user.id,
+            user.auth_version,
+            epoch_seconds().saturating_add(ttl),
+            client_ip.to_string(),
+            request.id,
+            request.uuid,
+        )
+        .await
+    {
+        log::error!("cannot record session: {err}");
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+    }
+    Json(json!({
+        "access_token": token,
+        "type": "access_token",
+        "tfa_type": "",
+        "secret": "",
+        "user": user_payload(&user),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -1920,7 +2330,7 @@ fn token_scope(base: &str, extra: &str) -> String {
     scope.join(" ")
 }
 
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer "))?;
     (!token.trim().is_empty()).then(|| token.trim().to_owned())
@@ -1938,7 +2348,7 @@ fn effective_ip(config: &ApiConfig, headers: &HeaderMap, peer: IpAddr) -> IpAddr
         .unwrap_or(peer)
 }
 
-fn api_error(status: StatusCode, code: &str) -> Response {
+pub(crate) fn api_error(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"error": code}))).into_response()
 }
 

@@ -1,6 +1,8 @@
 pub mod audit_log;
 mod allocation_explain;
+pub mod address_book;
 pub mod auth_server;
+pub mod directory;
 mod connection_auth;
 pub mod oidc;
 pub mod config_downgrade;
@@ -15,6 +17,7 @@ mod relay_quality;
 mod rendezvous_server;
 mod secure_tcp;
 pub mod strategy;
+pub mod totp;
 mod starry_config;
 mod telemetry;
 mod webrtc_signal;
