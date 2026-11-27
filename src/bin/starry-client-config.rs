@@ -4,9 +4,8 @@
 //! server address, the relay server address, and the server public key.
 //! Doing it by hand leaks mistakes (a rotated key pasted from memory). This
 //! tool reads the running server's `id_ed25519.pub` and renders the standard
-//! fields as text and a machine-readable JSON document. The client-side
-//! import-string flow is a Pro-console encrypted format and is intentionally
-//! not generated here.
+//! fields as text, a machine-readable JSON document, and the base64 import
+//! string in the RustDesk wire format (JSON reversed after encoding).
 //!
 //! No private material is ever read, and no token is minted: access tokens
 //! belong to the operator's identity provider, not to this server.
@@ -103,20 +102,36 @@ fn main() -> ExitCode {
     };
 
 
+    let import_json = json!({
+        "host": args.id_server,
+        "relay": args.relay_server,
+        "api": "",
+        "key": public_key,
+    });
+    // Wire format: base64(JSON) with the whole string reversed, so scanners
+    // do not recognise it as base64. Clients reverse, decode, then parse.
+    let import_string: String = base64::encode(
+        serde_json::to_vec(&import_json).expect("serialize import config"),
+    )
+    .chars()
+    .rev()
+    .collect();
+
     let rendered = match args.format {
         Format::Json => serde_json::to_string_pretty(&json!({
             "host": args.id_server,
             "relay": args.relay_server,
             "key": public_key,
+            "import_string": format!("rustdesk://config?s={import_string}"),
         }))
         .expect("serialize"),
         Format::Text => {
             let mut text = format!(
                 "ID Server:      {}\nRelay Server:   {}\nPublic Key:     {}\nStrategy Group: {}\n\n\
-                 Enter these in the client under Settings -> Network (ID Server /\n\
-                 Relay Server / Public Key), then Apply. The `config?s=` import\n\
-                 string is a Pro-console encrypted format and is intentionally\n\
-                 not generated here.",
+                 Import string (client: Settings -> Network -> Import server info,\n\
+                 or open as a URL):\nrustdesk://config?s={import_string}\n\n\
+                 Manual fields (equivalent): ID Server / Relay Server / Public Key\n\
+                 above, then Apply.",
                 args.id_server,
                 args.relay_server.as_deref().unwrap_or("(same as ID server)"),
                 public_key,

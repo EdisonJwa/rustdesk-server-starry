@@ -22,9 +22,10 @@ starry-client-config \
   read. Private material is never touched.
 - `--format text` (default) renders every form at once; `--format json`
   prints just the machine-readable document.
-- The **import string** (`rustdesk://config?s=<base64>`) is the standard
-  "Import server info" payload — verify it against your client version
-  before rolling it out in bulk.
+- The **import string** uses the RustDesk wire format: the JSON payload
+  \{"host", "relay", "api", "key"\} is base64-encoded and the whole string
+  reversed (leading `==` is normal), so scanners do not recognise it as
+  base64. Clients reverse, decode, then parse it.
 - `--group NAME` annotates the output with the strategy group the device
   belongs to. The server strategy document must match the device ID for the
   group's policy to apply; the annotation is a reminder, not enforcement.
