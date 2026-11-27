@@ -48,6 +48,10 @@ use tokio_rusqlite::{rusqlite, Connection};
 
 /// Request bodies carry credentials and device fingerprints, nothing large.
 const MAX_API_BODY: usize = 16 * 1024;
+/// An address book is pushed as one JSON string, so it needs its own bound: 16 KiB
+/// is far too small for a few hundred peers. Bounded so a single push cannot
+/// exhaust memory or the database.
+const MAX_ADDRESS_BOOK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LOGIN_FAILURES: u32 = 10;
 const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(300);
 const MAX_TRACKED_ADDRESSES: usize = 4_096;
@@ -367,6 +371,17 @@ create table if not exists sessions (
 );
 create index if not exists sessions_user on sessions (user_id);
 create index if not exists sessions_expiry on sessions (expires_at);
+-- Address book, one opaque document per user.
+--
+-- The client owns the shape: it sends {tags, peers, tag_colors} as a JSON string
+-- and parses it back verbatim, so this table stores the payload without
+-- interpreting it. Keeping the server out of that schema is deliberate — a
+-- client update must not require a server migration.
+create table if not exists address_books (
+    user_id integer primary key,
+    document text not null,
+    updated_at integer not null
+);
 ";
 
 #[derive(Clone, Debug)]
@@ -737,6 +752,40 @@ impl ApiState {
             .map_err(|err| err.to_string())
     }
 
+    /// Reads one account's address book, or `None` when it was never pushed.
+    async fn address_book_get(&self, user_id: i64) -> Result<Option<String>, String> {
+        self.db
+            .call(move |connection| {
+                let mut statement =
+                    connection.prepare("select document from address_books where user_id = ?1")?;
+                let mut rows = statement.query([user_id])?;
+                match rows.next()? {
+                    Some(row) => Ok::<_, rusqlite::Error>(Some(row.get::<_, String>(0)?)),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// Replaces one account's address book. The client always pushes the whole
+    /// document, so this is an upsert rather than a merge.
+    async fn address_book_put(&self, user_id: i64, document: &str) -> Result<(), String> {
+        let document = document.to_owned();
+        self.db
+            .call(move |connection| {
+                connection.execute(
+                    "insert into address_books (user_id, document, updated_at) values (?1, ?2, ?3)
+                     on conflict(user_id) do update set document = excluded.document,
+                                                        updated_at = excluded.updated_at",
+                    rusqlite::params![user_id, document, epoch_seconds() as i64],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     /// The single source of truth for "may this token still act": the session
     /// row must be live and the user must still be enabled at the same
     /// auth version that was minted into the token.
@@ -901,10 +950,9 @@ fn router(state: Arc<ApiState>) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/connection-token", post(connection_token))
         .route("/api/introspect", post(introspect))
-        // The client treats a literal `null` as "no address book", which keeps
-        // the Address Book tab clean until P1 adds one. Without this route the
-        // tab renders a pull error right after the first login.
-        .route("/api/ab", get(empty_address_book))
+        // The client GETs to pull and POSTs to push the same opaque document.
+        // A literal `null` means "no address book" and is a normal answer.
+        .route("/api/ab", get(address_book).post(address_book_push))
         .fallback(axum::routing::any(unknown_endpoint))
         .layer(Extension(state))
 }
@@ -1133,17 +1181,90 @@ async fn introspect(
     }
 }
 
-async fn empty_address_book(
+/// `GET /api/ab` — pull this account's address book.
+///
+/// The reply shape is what the client parses: `{"data": "<json string>",
+/// "licensed_devices": N}`. The document is echoed back verbatim; the server does
+/// not interpret `{tags, peers, tag_colors}`, so a client update cannot require a
+/// server change. `null` is the client's own "no address book yet" answer, and it
+/// treats a 401 as "sign out", so an unknown account must not get one.
+async fn address_book(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Response {
-    match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
-        Ok(_) => Json(Value::Null).into_response(),
-        Err(AuthFailure::Unauthorized) => api_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+        Ok((_, user)) => user,
+        Err(AuthFailure::Unauthorized) => {
+            return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
+        }
         Err(AuthFailure::Unavailable) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    };
+    match state.address_book_get(user.id).await {
+        Ok(Some(document)) => Json(json!({
+            "data": document,
+            "licensed_devices": reader_licensed_devices(),
+        }))
+        .into_response(),
+        Ok(None) => Json(Value::Null).into_response(),
+        Err(err) => {
+            log::error!("cannot read the address book: {err}");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
         }
     }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AddressBookPush {
+    /// JSON-encoded `{tags, peers, tag_colors}`, exactly as the client sent it.
+    data: String,
+}
+
+/// `POST /api/ab` — replace this account's address book.
+///
+/// The client sends `{"data": "<json string>"}` and accepts `null` as success.
+/// The payload is validated as JSON so a corrupt push cannot poison the pull, but
+/// its structure is not otherwise inspected.
+async fn address_book_push(
+    Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: RawBody<Body>,
+) -> Response {
+    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+        Ok((_, user)) => user,
+        Err(AuthFailure::Unauthorized) => {
+            return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
+        }
+        Err(AuthFailure::Unavailable) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    };
+    let push = match read_json_limited::<AddressBookPush>(body, MAX_ADDRESS_BOOK_BYTES).await {
+        Ok(push) => push,
+        Err(response) => return response,
+    };
+    if push.data.len() > MAX_ADDRESS_BOOK_BYTES {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "AddressBookTooLarge");
+    }
+    if serde_json::from_str::<Value>(&push.data).is_err() {
+        return api_error(StatusCode::BAD_REQUEST, "ParamsError");
+    }
+    match state.address_book_put(user.id, &push.data).await {
+        Ok(()) => Json(Value::Null).into_response(),
+        Err(err) => {
+            log::error!("cannot store the address book: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    }
+}
+
+/// Device count the client uses to trim an oversized book. Starry does not
+/// licence devices, so this reports an effectively unbounded number rather than
+/// silently truncating someone's peers.
+fn reader_licensed_devices() -> u64 {
+    1_000_000
 }
 
 async fn unknown_endpoint() -> Response {
@@ -1197,13 +1318,25 @@ fn api_error(status: StatusCode, code: &str) -> Response {
 }
 
 async fn read_json<T: DeserializeOwned>(body: RawBody<Body>) -> Result<T, Response> {
+    read_json_limited(body, MAX_API_BODY).await
+}
+
+/// Reads a JSON body up to `limit` bytes.
+///
+/// Most endpoints carry credentials and device fingerprints, so they share a tight
+/// bound. The address book is the one payload that is legitimately large, and it
+/// passes its own limit rather than raising everyone's.
+async fn read_json_limited<T: DeserializeOwned>(
+    body: RawBody<Body>,
+    limit: usize,
+) -> Result<T, Response> {
     let RawBody(mut body) = body;
     let mut bytes = Vec::new();
     while let Some(chunk) = body.data().await {
         let Ok(chunk) = chunk else {
             return Err(api_error(StatusCode::BAD_REQUEST, "ParamsError"));
         };
-        if bytes.len().saturating_add(chunk.len()) > MAX_API_BODY {
+        if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(api_error(StatusCode::PAYLOAD_TOO_LARGE, "ParamsError"));
         }
         bytes.extend_from_slice(&chunk);
@@ -1447,6 +1580,50 @@ mod tests {
         let after = lookup_user_sync(&connection, "alice").unwrap().unwrap();
         assert_eq!(after.auth_version, before.auth_version + 1);
         assert!(bcrypt::verify("another-one", &after.password_hash).unwrap());
+    }
+
+    /// The address book is stored and returned byte-for-byte: the client owns the
+    /// document shape, so any server-side rewriting would corrupt a client update.
+    #[test]
+    fn an_address_book_round_trips_verbatim() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = open_database(&directory.path().join("users.db")).unwrap();
+        // The inner tag_colors value is itself a JSON string, so the document
+        // contains escaped quotes; use a delimiter that cannot collide.
+        let document = r##"{"tags":["office"],"peers":[{"id":"123","alias":"prod-1","hash":"abc"}],"tag_colors":"{\"office\":\"#ff0000\"}"}"##;
+        connection
+            .execute(
+                "insert into address_books (user_id, document, updated_at) values (1, ?1, 0)",
+                [document],
+            )
+            .unwrap();
+        let stored: String = connection
+            .query_row("select document from address_books where user_id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, document);
+
+        // A second push for the same user replaces rather than appends.
+        let replacement = r#"{"tags":[],"peers":[],"tag_colors":"{}"}"#;
+        connection
+            .execute(
+                "insert into address_books (user_id, document, updated_at) values (1, ?1, 1)
+                 on conflict(user_id) do update set document = excluded.document,
+                                                    updated_at = excluded.updated_at",
+                [replacement],
+            )
+            .unwrap();
+        let stored: String = connection
+            .query_row("select document from address_books where user_id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, replacement);
+        let count: i64 = connection
+            .query_row("select count(*) from address_books", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "a push must not accumulate rows");
     }
 
     #[test]

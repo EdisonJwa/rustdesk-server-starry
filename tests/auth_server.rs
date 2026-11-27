@@ -347,12 +347,51 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     );
     assert_eq!(status, 401, "a logged-out token must stop working");
 
-    // Address book: a literal null is the client's "no address book" reply.
-    let (status, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &login_token(&api));
+    // Address book: a literal null is the client's "no address book" reply, and
+    // a pull before any push must produce exactly that.
+    let token_for_ab = login_token(&api);
+    let (status, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &token_for_ab);
     assert_eq!(status, 200);
     assert_eq!(body.trim(), "null");
     let (status, _) = http_get(&format!("{}/api/ab", api.base)).unwrap();
-    assert_eq!(status, 401);
+    assert_eq!(status, 401, "an unauthenticated pull must not look like an empty book");
+
+    // A push is answered with null and the exact document comes back verbatim:
+    // the client owns this shape, so any server-side rewrite corrupts it.
+    // tag_colors is itself a JSON string, so the document holds escaped quotes;
+    // a plain r#"..."# delimiter would terminate on the inner `"#`.
+    let document = r##"{"tags":["office","lab"],"peers":[{"id":"9001","alias":"prod-db","hash":"h1"}],"tag_colors":"{\"office\":\"#00ff00\"}"}"##;
+    let (status, body) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        &json!({ "data": document }),
+        Some(&token_for_ab),
+    );
+    assert_eq!(status, 200, "push failed: {body}");
+    assert_eq!(body.trim(), "null");
+
+    let (status, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &token_for_ab);
+    assert_eq!(status, 200);
+    let pulled: Value = serde_json::from_str(&body).expect("pull must return the envelope");
+    assert_eq!(
+        pulled["data"], document,
+        "the document must round-trip unchanged"
+    );
+    assert!(
+        pulled["licensed_devices"].as_u64().unwrap_or(0) > 0,
+        "the client needs a device ceiling; Starry does not licence devices"
+    );
+
+    // A malformed document is refused rather than stored, so a bad push cannot
+    // poison every later pull.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        &json!({ "data": "{not json" }),
+        Some(&token_for_ab),
+    );
+    assert_eq!(status, 400);
+    let (_, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &token_for_ab);
+    let still: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["data"], document, "a rejected push must not clobber the book");
 
     // Unknown endpoints answer JSON so clients never choke on HTML.
     let (status, body) = http_get(&format!("{}/api/nope", api.base)).unwrap();
