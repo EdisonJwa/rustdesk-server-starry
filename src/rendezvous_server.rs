@@ -456,7 +456,14 @@ impl RendezvousServer {
                     }
                 }
                 _ = timer_check_relay.tick() => {
-                    if self.relay_servers0.len() > 1 {
+                    // Probe whatever is configured, including a single relay.
+                    // gating this on len() > 1 meant the probe never ran for a
+                    // one-relay deployment, so that relay could stay unmarked.
+                    // tests/relay_selection.rs does not isolate this branch (its
+                    // fixture also marks the relay reachable through the
+                    // websocket health path), so this is a defensive fix rather
+                    // than one with its own failing-before gate.
+                    if !self.relay_servers0.is_empty() {
                         let rs = self.relay_servers0.clone();
                         let tx = self.tx.clone();
                         tokio::spawn(async move {
