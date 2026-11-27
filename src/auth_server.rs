@@ -382,6 +382,26 @@ create table if not exists address_books (
     document text not null,
     updated_at integer not null
 );
+-- External identity bindings for OIDC login.
+--
+-- One row per (provider, subject). The subject is the identity provider's
+-- stable identifier for the human; `email` is advisory and may change, so it is
+-- stored for display rather than used as the key.
+--
+-- Deliberately separate from `users`: an account can start with a password and
+-- later gain an SSO binding, and a deployment can run OIDC with no local
+-- password at all. Keeping the binding in its own table means neither shape is
+-- privileged.
+create table if not exists oidc_links (
+    provider text not null,
+    subject text not null,
+    user_id integer not null,
+    email text not null default '',
+    created_at integer not null,
+    last_login_at integer not null,
+    primary key (provider, subject)
+);
+create index if not exists oidc_links_user on oidc_links (user_id);
 ";
 
 #[derive(Clone, Debug)]
@@ -545,6 +565,37 @@ pub fn list_users(connection: &rusqlite::Connection) -> Result<Vec<(String, bool
     Ok(users)
 }
 
+/// Coerces an external login name into something `validate_user_fields`
+/// accepts.
+///
+/// IdP-supplied names are arbitrary strings: an e-mail address contains `@`, a
+/// display name may contain spaces, and neither is a legal account name here.
+/// Rather than reject the login, the name is reduced to a safe form and the
+/// original is kept as `display_name` by the caller.
+fn sanitize_account_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.trim().chars() {
+        if ch.is_whitespace() || ch.is_control() || ch == '/' || ch == '\\' {
+            out.push('-');
+        } else {
+            out.push(ch);
+        }
+    }
+    // Collapse runs of the replacement so "a  b" does not become "a--b".
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let trimmed = out.trim_matches('-').to_owned();
+    if trimmed.is_empty() {
+        return "oidc-user".to_owned();
+    }
+    // The column takes 64 characters, and suffixing needs headroom.
+    if trimmed.chars().count() > 48 {
+        return trimmed.chars().take(48).collect();
+    }
+    trimmed
+}
+
 fn validate_user_fields(name: &str, password: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() || name.len() > 64 {
@@ -676,6 +727,14 @@ struct ApiState {
     config: ApiConfig,
     dummy_hash: String,
     limiter: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    /// OIDC login state. Always present; `enabled()` is false unless the
+    /// operator configured at least one provider, which keeps the endpoints
+    /// answering "not configured" instead of 404 so a client's probe is
+    /// unambiguous.
+    ///
+    /// An `Arc` because the discovery fetch and the callback both run on the
+    /// blocking pool, which needs an owned handle rather than a borrow.
+    oidc: Arc<crate::oidc::OidcRuntime>,
 }
 
 impl ApiState {
@@ -731,6 +790,152 @@ impl ApiState {
                 connection.execute(
                     "delete from sessions where user_id = ?1 and expires_at < ?2",
                     rusqlite::params![user_id, now - SESSION_PRUNE_GRACE_SECONDS as i64],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// Resolves the local account bound to an external identity, creating it
+    /// on first sight.
+    ///
+    /// Linking is keyed on `(provider, subject)` and never on the e-mail
+    /// address: an IdP is free to change or recycle e-mail addresses, and
+    /// treating them as identities would let a later holder of a recycled
+    /// address inherit the earlier person's account.
+    ///
+    /// The account name comes from the claims, but a collision with an existing
+    /// unrelated account is resolved by suffixing rather than by attaching the
+    /// binding to that account — otherwise anyone who could set `email` at the
+    /// IdP could take over a same-named local user.
+    async fn link_or_create_oidc_user(
+        &self,
+        provider: String,
+        subject: String,
+        preferred_name: String,
+        email: String,
+        display_name: String,
+        avatar: String,
+        bcrypt_cost: u32,
+    ) -> Result<User, String> {
+        let db = &self.db;
+        let provider_for_lookup = provider.clone();
+        let subject_for_lookup = subject.clone();
+        if let Some(user_id) = db
+            .call(move |connection| {
+                let mut statement = connection.prepare(
+                    "select u.id from oidc_links l join users u on u.id = l.user_id
+                     where l.provider = ?1 and l.subject = ?2",
+                )?;
+                let mut rows = statement.query([provider_for_lookup.as_str(), subject_for_lookup.as_str()])?;
+                let Some(row) = rows.next()? else {
+                    return Ok::<_, rusqlite::Error>(None);
+                };
+                let id: i64 = row.get(0)?;
+                Ok(Some(id))
+            })
+            .await
+            .map_err(|err| err.to_string())?
+        {
+            self.upsert_oidc_link(user_id, provider, subject, email).await?;
+            return self
+                .user_by_id(user_id)
+                .await?
+                .ok_or_else(|| "linked account disappeared".to_owned());
+        }
+
+        // First login for this identity: mint a local account with a random
+        // password. OIDC users never learn it, and it cannot be used to log in
+        // through /api/login because nothing sets it to a known value.
+        let created = self
+            .create_oidc_account(
+                preferred_name,
+                email.clone(),
+                display_name,
+                avatar,
+                bcrypt_cost,
+            )
+            .await?;
+        self.upsert_oidc_link(created, provider, subject, email).await?;
+        self.user_by_id(created)
+            .await?
+            .ok_or_else(|| "newly created account disappeared".to_owned())
+    }
+
+    /// Creates an account for an external identity, picking a free name.
+    async fn create_oidc_account(
+        &self,
+        preferred_name: String,
+        email: String,
+        display_name: String,
+        avatar: String,
+        bcrypt_cost: u32,
+    ) -> Result<i64, String> {
+        // A password nobody knows: generated here, hashed, and never returned.
+        let unusable = uuid::Uuid::new_v4().to_string();
+        let hash = hash_password_async(unusable, bcrypt_cost).await?;
+        let preferred_name = sanitize_account_name(&preferred_name);
+        let display = if display_name.trim().is_empty() {
+            preferred_name.clone()
+        } else {
+            display_name
+        };
+        self.db
+            .call(move |connection| {
+                let now = epoch_seconds() as i64;
+                // Try the preferred name, then suffixed variants. Bounded so a
+                // hostile IdP cannot spin here.
+                for attempt in 0..64 {
+                    let name = if attempt == 0 {
+                        preferred_name.clone()
+                    } else {
+                        format!("{preferred_name}-{attempt}")
+                    };
+                    let result = connection.execute(
+                        "insert into users (name, password_hash, display_name, avatar, email, status, is_admin, auth_version, extra_scopes, created_at, updated_at)
+                         values (?1, ?2, ?3, ?4, ?5, 1, 0, 1, '', ?6, ?6)",
+                        rusqlite::params![name, hash, display, avatar, email, now],
+                    );
+                    match result {
+                        Ok(_) => return Ok::<_, rusqlite::Error>(connection.last_insert_rowid()),
+                        Err(err) if err.to_string().contains("UNIQUE") => continue,
+                        Err(err) => return Err(err),
+                    }
+                }
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(1),
+                    Some("cannot find a free account name".to_owned()),
+                ))
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// Records or refreshes the binding between an external identity and an
+    /// account.
+    ///
+    /// An upsert because the same identity logs in repeatedly: the e-mail may
+    /// change and the timestamps always do, while the `(provider, subject)` key
+    /// and its `user_id` must not. The caller passes the account, so a rename at
+    /// the IdP cannot repoint an existing binding at a different user.
+    async fn upsert_oidc_link(
+        &self,
+        user_id: i64,
+        provider: String,
+        subject: String,
+        email: String,
+    ) -> Result<(), String> {
+        self.db
+            .call(move |connection| {
+                let now = epoch_seconds() as i64;
+                connection.execute(
+                    "insert into oidc_links (provider, subject, user_id, email, created_at, last_login_at)
+                     values (?1, ?2, ?3, ?4, ?5, ?5)
+                     on conflict(provider, subject) do update set
+                         email = excluded.email,
+                         last_login_at = excluded.last_login_at",
+                    rusqlite::params![provider, subject, user_id, email, now],
                 )?;
                 Ok::<_, rusqlite::Error>(())
             })
@@ -953,6 +1158,11 @@ fn router(state: Arc<ApiState>) -> Router {
         // The client GETs to pull and POSTs to push the same opaque document.
         // A literal `null` means "no address book" and is a normal answer.
         .route("/api/ab", get(address_book).post(address_book_push))
+        // OIDC: the client starts a login, then polls for its result. The
+        // browser half lands on /oidc/callback, which the IdP redirects to.
+        .route("/api/oidc/auth", post(oidc_auth_start))
+        .route("/api/oidc/auth-query", get(oidc_auth_query))
+        .route("/oidc/callback", get(oidc_callback))
         .fallback(axum::routing::any(unknown_endpoint))
         .layer(Extension(state))
 }
@@ -961,11 +1171,16 @@ async fn health() -> impl IntoResponse {
     Json(json!({"status": "live"}))
 }
 
-/// Password login only: the client parses this as `List<String>` and derives
-/// third-party buttons from entries. An empty array is the correct answer,
-/// while an object would make the client fail to parse the body.
-async fn login_options() -> impl IntoResponse {
-    Json(Vec::<String>::new())
+/// Third-party login options: the client parses this as `List<String>` and
+/// derives provider buttons from the entries. An empty array is the correct
+/// answer when no OIDC provider is configured, while an object would make the
+/// client fail to parse the body.
+///
+/// The `common-oidc/<json>` form is used rather than `oidc/<name>` because the
+/// client checks for that prefix first and it is the only form that can label
+/// and brand several providers at once.
+async fn login_options(Extension(state): Extension<Arc<ApiState>>) -> impl IntoResponse {
+    Json(state.oidc.config.login_option_entries())
 }
 
 #[derive(Deserialize, Default)]
@@ -1267,6 +1482,416 @@ fn reader_licensed_devices() -> u64 {
     1_000_000
 }
 
+// ---------------------------------------------------------------------------
+// OIDC
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct OidcAuthRequest {
+    /// The provider name the client got from `/api/login-options`.
+    op: String,
+    /// Device id, so the issued session is bound to the machine that asked.
+    id: String,
+    uuid: String,
+    device_info: Value,
+    api_domain: String,
+}
+
+/// Answers `{code, url}`: the client opens `url` in a browser and polls
+/// `/api/oidc/auth-query` with `code` until the login completes.
+async fn oidc_auth_start(
+    Extension(state): Extension<Arc<ApiState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: RawBody<Body>,
+) -> Response {
+    if !state.oidc.enabled() {
+        return api_error(StatusCode::NOT_IMPLEMENTED, "OidcNotConfigured");
+    }
+    let request = match read_json::<OidcAuthRequest>(body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let Some(provider) = state.oidc.provider(&request.op).cloned() else {
+        return api_error(StatusCode::BAD_REQUEST, "UnknownOidcProvider");
+    };
+    let _ = request.api_domain;
+    log::info!(
+        "OIDC login started for provider {} from {} (device {}, info {})",
+        provider.name,
+        effective_ip(&state.config, &headers, peer.ip()),
+        request.id,
+        request.device_info
+    );
+
+    // Discovery is a network call, so it runs off the async reactor.
+    let runtime = state.oidc.clone_handle();
+    let provider_for_task = provider.clone();
+    let document =
+        match hbb_common::tokio::task::spawn_blocking(move || runtime.discovery(&provider_for_task))
+            .await
+        {
+            Ok(Ok(document)) => document,
+            Ok(Err(err)) => {
+                log::error!("cannot load OIDC discovery: {err}");
+                return api_error(StatusCode::BAD_GATEWAY, "OidcDiscoveryFailed");
+            }
+            Err(err) => {
+                log::error!("OIDC discovery task failed: {err}");
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+            }
+        };
+
+    let nonce = crate::oidc::random_token();
+    let state_parameter = crate::oidc::random_token();
+    let code_verifier = crate::oidc::random_token();
+    let challenge = crate::oidc::code_challenge(&code_verifier);
+    let url = match crate::oidc::authorization_url(
+        &document,
+        &provider,
+        &state_parameter,
+        &nonce,
+        &challenge,
+    ) {
+        Ok(url) => url,
+        Err(err) => {
+            log::error!("cannot build OIDC authorization URL: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+
+    let pending = crate::oidc::PendingLogin {
+        provider: provider.name.clone(),
+        nonce,
+        state_parameter,
+        code_verifier,
+        device_id: request.id,
+        device_uuid: request.uuid,
+        created: Instant::now(),
+        state: crate::oidc::PendingState::Waiting,
+    };
+    let code = match state
+        .oidc
+        .pending
+        .insert(pending, state.oidc.config.request_ttl)
+    {
+        Ok(code) => code,
+        Err(err) => {
+            log::warn!("cannot record OIDC login: {}", err.as_str());
+            return api_error(StatusCode::TOO_MANY_REQUESTS, "TooManyAttempts");
+        }
+    };
+    Json(json!({"code": code, "url": url})).into_response()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OidcQueryRequest {
+    code: String,
+    id: String,
+    uuid: String,
+}
+
+/// Polled once a second by the client until the browser half completes.
+///
+/// The answer is wrapped in `{"body": "<json string>"}` because the client
+/// parses the outer object first and then parses the inner string as an
+/// `HbbHttpResponse`, which decides success versus error by the presence of a
+/// top-level `error` key rather than by HTTP status.
+async fn oidc_auth_query(
+    Extension(state): Extension<Arc<ApiState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<OidcQueryRequest>,
+) -> Response {
+    if !state.oidc.enabled() {
+        return oidc_query_error("OidcNotConfigured");
+    }
+    if query.code.is_empty() {
+        return oidc_query_error("ParamsError");
+    }
+    let ttl = state.oidc.config.request_ttl;
+    let pending = match state.oidc.pending.peek(&query.code, ttl) {
+        Ok(pending) => pending,
+        // "No authed oidc is found" is the exact substring the client ignores
+        // while it keeps polling, so every not-yet-finished case must use it.
+        // Anything else makes the client stop and surface an error.
+        Err(_) => return oidc_query_error("No authed oidc is found"),
+    };
+    // A pending login that is not yet completed must read as "keep waiting".
+    if !matches!(pending.state, crate::oidc::PendingState::Completed(_)) {
+        return oidc_query_error("No authed oidc is found");
+    }
+
+    // Credentials are handed out exactly once, so the entry is consumed here.
+    // Reading it through `take_completed` rather than the peeked copy is what
+    // makes the second poll empty.
+    let login = match state.oidc.pending.take_completed(&query.code, ttl) {
+        Ok(login) => login,
+        Err(_) => return oidc_query_error("No authed oidc is found"),
+    };
+    let user = match state
+        .link_or_create_oidc_user(
+            pending.provider.clone(),
+            login.subject,
+            login.username,
+            login.email.unwrap_or_default(),
+            login.display_name,
+            login.avatar,
+            state.config.bcrypt_cost,
+        )
+        .await
+    {
+        Ok(user) => user,
+        Err(err) => {
+            log::error!("cannot link OIDC identity: {err}");
+            return oidc_query_error("SystemError");
+        }
+    };
+    if user.status != 1 {
+        return oidc_query_error("UserDisabled");
+    }
+
+    let scope = token_scope(&state.config.base_scope, &user.extra_scopes);
+    let token_ttl = state.config.token_ttl_seconds;
+    let (token, jti) = match mint_token(TokenRequest {
+        key: &state.key,
+        issuer: &state.config.issuer,
+        audience: &state.config.audience,
+        user_id: user.id,
+        auth_version: user.auth_version,
+        scope: &scope,
+        ttl_seconds: token_ttl,
+    }) {
+        Ok(minted) => minted,
+        Err(err) => {
+            log::error!("cannot mint OIDC login token: {err}");
+            return oidc_query_error("SystemError");
+        }
+    };
+    if let Err(err) = state
+        .insert_session(
+            jti,
+            user.id,
+            user.auth_version,
+            epoch_seconds().saturating_add(token_ttl),
+            effective_ip(&state.config, &headers, peer.ip()).to_string(),
+            query.id,
+            query.uuid,
+        )
+        .await
+    {
+        log::error!("cannot record OIDC session: {err}");
+        return oidc_query_error("SystemError");
+    }
+    log::info!(
+        "OIDC login accepted for {} via {}",
+        user.name,
+        pending.provider
+    );
+    oidc_query_success(json!({
+        "access_token": token,
+        "type": "access_token",
+        "tfa_type": "",
+        "secret": "",
+        "user": user_payload(&user),
+    }))
+}
+
+/// Wraps an error so the client's `HbbHttpResponse` parser sees `error`.
+fn oidc_query_error(code: &str) -> Response {
+    let inner = json!({"error": code}).to_string();
+    Json(json!({"body": inner})).into_response()
+}
+
+/// Wraps a successful payload the same way.
+fn oidc_query_success(payload: Value) -> Response {
+    let inner = payload.to_string();
+    Json(json!({"body": inner})).into_response()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OidcCallbackRequest {
+    code: String,
+    state: String,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// The browser half: the IdP redirects here with `code` and `state`.
+///
+/// Redeems the authorization code at the token endpoint, verifies the id_token
+/// and records the completed login. The answer is HTML because a browser is
+/// what lands here.
+async fn oidc_callback(
+    Extension(state): Extension<Arc<ApiState>>,
+    axum::extract::Query(query): axum::extract::Query<OidcCallbackRequest>,
+) -> Response {
+    if let Some(error) = query.error.as_deref() {
+        log::warn!(
+            "OIDC provider returned an error: {error} ({})",
+            query.error_description.unwrap_or_default()
+        );
+        return oidc_callback_page(StatusCode::BAD_REQUEST, "Sign-in was not completed.");
+    }
+    if query.state.is_empty() || query.code.is_empty() {
+        return oidc_callback_page(
+            StatusCode::BAD_REQUEST,
+            "The sign-in response was incomplete.",
+        );
+    }
+    let ttl = state.oidc.config.request_ttl;
+    let pending_code = match state.oidc.pending.code_for_state(&query.state, ttl) {
+        Ok(code) => code,
+        // An unknown state is either a stale tab or a forged callback; both are
+        // refused without saying which.
+        Err(_) => {
+            return oidc_callback_page(StatusCode::BAD_REQUEST, "This sign-in link has expired.")
+        }
+    };
+    let pending = match state.oidc.pending.peek(&pending_code, ttl) {
+        Ok(pending) => pending,
+        Err(_) => {
+            return oidc_callback_page(StatusCode::BAD_REQUEST, "This sign-in link has expired.")
+        }
+    };
+    let Some(provider) = state.oidc.provider(&pending.provider).cloned() else {
+        return oidc_callback_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The provider is no longer configured.",
+        );
+    };
+
+    // The exchange and verification are synchronous HTTP plus crypto, so they
+    // run on the blocking pool rather than stalling the API's reactor.
+    let runtime = state.oidc.clone_handle();
+    let provider_for_task = provider.clone();
+    let code = query.code.clone();
+    let verifier = pending.code_verifier.clone();
+    let nonce = pending.nonce.clone();
+    let result = hbb_common::tokio::task::spawn_blocking(move || {
+        exchange_and_verify(&runtime, &provider_for_task, &code, &verifier, &nonce)
+    })
+    .await;
+
+    let claims = match result {
+        Ok(Ok(claims)) => claims,
+        Ok(Err(rejection)) => {
+            log::warn!("OIDC callback rejected: {}", rejection.as_str());
+            return oidc_callback_page(StatusCode::UNAUTHORIZED, "Sign-in could not be verified.");
+        }
+        Err(err) => {
+            log::error!("OIDC callback task failed: {err}");
+            return oidc_callback_page(StatusCode::INTERNAL_SERVER_ERROR, "Sign-in failed.");
+        }
+    };
+
+    let login = crate::oidc::CompletedLogin {
+        username: claims.username(&provider),
+        subject: claims.sub.clone(),
+        email: claims.email.clone(),
+        display_name: claims.name.clone().unwrap_or_default(),
+        avatar: claims.picture.clone().unwrap_or_default(),
+    };
+    match state
+        .oidc
+        .pending
+        .complete(&pending_code, &query.state, login, ttl)
+    {
+        Ok(()) => oidc_callback_page(
+            StatusCode::OK,
+            "Sign-in complete. You can close this window.",
+        ),
+        Err(err) => {
+            log::warn!(
+                "OIDC callback could not complete the login: {}",
+                err.as_str()
+            );
+            oidc_callback_page(
+                StatusCode::BAD_REQUEST,
+                "This sign-in was already completed.",
+            )
+        }
+    }
+}
+
+/// Redeems the authorization code and validates the resulting id_token.
+fn exchange_and_verify(
+    runtime: &crate::oidc::OidcRuntime,
+    provider: &crate::oidc::Provider,
+    code: &str,
+    code_verifier: &str,
+    nonce: &str,
+) -> Result<crate::oidc::IdTokenClaims, crate::oidc::TokenRejection> {
+    use crate::oidc::TokenRejection;
+    let document = runtime.discovery(provider).map_err(|err| {
+        log::error!("OIDC discovery failed during callback: {err}");
+        TokenRejection::SignatureOrFormat
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| TokenRejection::SignatureOrFormat)?;
+    let mut form = vec![
+        ("grant_type", "authorization_code".to_owned()),
+        ("code", code.to_owned()),
+        ("redirect_uri", provider.redirect_uri.clone()),
+        ("client_id", provider.client_id.clone()),
+        ("code_verifier", code_verifier.to_owned()),
+    ];
+    if let Some(secret) = provider.client_secret.as_deref() {
+        form.push(("client_secret", secret.to_owned()));
+    }
+    let response = client
+        .post(&document.token_endpoint)
+        .form(&form)
+        .send()
+        .map_err(|err| {
+            log::error!("OIDC token exchange failed: {err}");
+            TokenRejection::SignatureOrFormat
+        })?;
+    if !response.status().is_success() {
+        log::warn!("OIDC token endpoint answered {}", response.status());
+        return Err(TokenRejection::SignatureOrFormat);
+    }
+    let token: crate::oidc::TokenResponse = response
+        .json()
+        .map_err(|_| TokenRejection::SignatureOrFormat)?;
+    let id_token = token.id_token.ok_or(TokenRejection::SignatureOrFormat)?;
+    let jwks = runtime.jwks(&document).map_err(|err| {
+        log::error!("cannot fetch OIDC JWKS: {err}");
+        TokenRejection::SignatureOrFormat
+    })?;
+    let claims = crate::oidc::verify_signature(&id_token, provider, &jwks)?;
+    crate::oidc::validate_claims(
+        &claims,
+        provider,
+        nonce,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0),
+    )?;
+    Ok(claims)
+}
+
+fn oidc_callback_page(status: StatusCode, message: &str) -> Response {
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Starry sign-in</title></head>\
+         <body style=\"font-family:system-ui;margin:4rem auto;max-width:32rem;text-align:center\">\
+         <p>{message}</p></body></html>"
+    );
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
 async fn unknown_endpoint() -> Response {
     api_error(StatusCode::NOT_FOUND, "NotFound")
 }
@@ -1383,6 +2008,8 @@ pub async fn run(config: ApiConfig) -> Result<(), String> {
         key.kid
     );
 
+    let oidc_config = crate::oidc::OidcConfig::from_env()?;
+
     let database = open_database(&config.db_path)?;
     if let Some(password) = config.admin_password.clone() {
         bootstrap_admin(&database, &password, config.bcrypt_cost)?;
@@ -1393,12 +2020,26 @@ pub async fn run(config: ApiConfig) -> Result<(), String> {
         .map_err(|err| format!("cannot open {}: {err}", config.db_path.display()))?;
 
     let dummy_hash = hash_password_async(uuid::Uuid::new_v4().to_string(), config.bcrypt_cost).await?;
+    let oidc = Arc::new(crate::oidc::OidcRuntime::new(oidc_config));
+    if oidc.enabled() {
+        log::info!(
+            "OIDC enabled with {} provider(s): {}",
+            oidc.config.providers.len(),
+            oidc.config
+                .providers
+                .iter()
+                .map(|provider| provider.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let state = Arc::new(ApiState {
         db,
         key: key.clone(),
         config: config.clone(),
         dummy_hash,
         limiter: Mutex::new(HashMap::new()),
+        oidc,
     });
 
     // Keep re-attesting the keyset: hbbs fails closed once the stamp is older

@@ -22,9 +22,12 @@ that closes the authentication loop:
    HBBS then refuses connections whose token is absent, forged, expired, or
    missing a required scope. Strategy v1 group rules apply on top.
 
-Boundary of v1: this is a credential issuer, not an OIDC identity provider.
-Enterprise SSO (OIDC/LDAP) and TOTP are v1.1; the user table already has the
-fields (`status`, `auth_version`, `extra_scopes`) they will need.
+Boundary: this is a credential issuer, not an identity provider. It never
+authenticates a human itself; it either checks a password it stores or delegates
+that check to an external OIDC provider and then issues its own token. See
+[OIDC login](OIDC-LOGIN.md) for the single-sign-on path. LDAP and TOTP are still
+absent; the user table already has the fields (`status`, `auth_version`,
+`extra_scopes`) they would need.
 
 ## Wire contract (verified against rustdesk 1.5.x client source)
 

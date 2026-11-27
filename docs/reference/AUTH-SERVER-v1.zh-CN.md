@@ -19,8 +19,10 @@
    发布的 JWKS，并设 `connection_auth.mode: enforce`。HBBS 随即拒绝缺失/伪造/
    过期/缺少所需 scope 的连接。Strategy v1 的分组规则在其之上生效。
 
-v1 的边界：这是凭据签发者，不是 OIDC 身份提供者。企业 SSO（OIDC/LDAP）与
-TOTP 属 v1.1；用户表已备好所需字段（`status`、`auth_version`、`extra_scopes`）。
+边界：这是凭据签发者，不是身份提供者。它自己从不认证人；要么校验它保存的
+密码，要么把该校验委托给外部 OIDC 提供者，然后签发自己的令牌。单点登录路径见
+[OIDC 登录](OIDC-LOGIN.zh-CN.md)。LDAP 与 TOTP 仍未实现；用户表已备好它们所需
+的字段（`status`、`auth_version`、`extra_scopes`）。
 
 ## 线契约（已对照 rustdesk 1.5.x 客户端源码核实）
 
