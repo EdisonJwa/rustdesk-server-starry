@@ -434,6 +434,31 @@ impl AuthRuntime {
         state.loaded_at_epoch_seconds = Some(fetched_at);
         Ok(())
     }
+
+    /// A deployment whose keyset is published as a local file has no remote
+    /// endpoint to poll, so this is its refresh path: re-read the file so a
+    /// rotation takes effect, and adopt the issuer's freshness stamp. Without
+    /// it the keyset would be stamped only once at startup and every
+    /// connection would report `key_stale` after `max_stale_seconds`, silently
+    /// breaking enforce mode.
+    ///
+    /// Freshness comes from the stamp the issuer publishes next to the keyset,
+    /// never from this process's clock: otherwise a keyset left on disk for
+    /// months would be laundered into a fresh one on the next poll.
+    async fn reload_jwks_file(&self, path: &Path) -> Result<(), String> {
+        let raw = fs::read(path).map_err(|err| format!("cannot read JWKS: {err}"))?;
+        let keys = parse_jwks(&raw)?;
+        // Freshness first: adopting new keys while keeping the previous stamp,
+        // or the reverse, would let a half-published rotation through.
+        let freshness = load_jwks_freshness(path, &raw, false)?;
+        let mut state = self
+            .keys
+            .write()
+            .map_err(|_| "JWKS state lock is unavailable".to_owned())?;
+        state.keys = keys;
+        state.loaded_at_epoch_seconds = freshness;
+        Ok(())
+    }
 }
 
 impl IntrospectionRuntime {
@@ -975,7 +1000,9 @@ fn default_jwks_client() -> reqwest::Client {
 }
 
 fn start_jwks_refresh(runtime: Arc<AuthRuntime>) {
-    if runtime.config.jwks.url.is_empty() {
+    let remote = !runtime.config.jwks.url.is_empty();
+    let local = runtime.jwks_file.clone();
+    if !remote && local.is_none() {
         return;
     }
     hbb_common::tokio::spawn(async move {
@@ -985,7 +1012,15 @@ fn start_jwks_refresh(runtime: Arc<AuthRuntime>) {
             if runtime.cancelled.load(Ordering::Acquire) {
                 return;
             }
-            if let Err(err) = runtime.refresh_jwks().await {
+            let result = if remote {
+                runtime.refresh_jwks().await
+            } else {
+                match local.as_deref() {
+                    Some(path) => runtime.reload_jwks_file(path).await,
+                    None => Ok(()),
+                }
+            };
+            if let Err(err) = result {
                 hbb_common::log::warn!(
                     "JWKS refresh failed; retaining last-known-good keys: {err}"
                 );
@@ -1194,6 +1229,79 @@ fn resolve_path(base: &Path, configured: &str) -> PathBuf {
         base.join(path)
     }
 }
+
+/// Test-only verifier construction. The API server's unit tests need proof
+/// that a freshly minted token satisfies *this* module's exact validation
+/// rules, not a re-implementation of them, so both sides must be exercised
+/// against the same code.
+#[cfg(test)]
+pub(crate) struct ContractVerifier {
+    runtime: AuthRuntime,
+}
+
+#[cfg(test)]
+impl ContractVerifier {
+    pub(crate) fn verify_token(&self, token: &str) -> Result<(u64, String), &'static str> {
+        let claims = self.runtime.verify_local_at(token, epoch_seconds(), None)?;
+        let user_id = claims
+            .subject
+            .parse::<u64>()
+            .map_err(|_| "subject_mismatch")?;
+        // Re-derive the scope from the raw token to assert what the caller
+        // actually minted rather than what validation happened to accept.
+        let decoded = decode_config(
+            token.split('.').nth(1).ok_or("malformed_token")?,
+            URL_SAFE_NO_PAD,
+        )
+        .map_err(|_| "malformed_token")?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&decoded).map_err(|_| "malformed_token")?;
+        let scope = value
+            .get("scope")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        Ok((user_id, scope))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_verifier(
+    issuer: &str,
+    audience: &str,
+    jwks_document: &[u8],
+) -> ContractVerifier {
+    let keys = parse_jwks(jwks_document).expect("test JWKS must parse");
+    ContractVerifier {
+        runtime: AuthRuntime {
+            configured_mode: ConnectionAuthMode::Enforce,
+            effective_mode: ConnectionAuthMode::Enforce,
+            config: ConnectionAuthConfig {
+                mode: ConnectionAuthMode::Enforce,
+                issuer: issuer.to_owned(),
+                audience: audience.to_owned(),
+                token_use: "access".to_owned(),
+                required_scope: "connect:initiate".to_owned(),
+                max_token_bytes: 8_192,
+                clock_skew_seconds: 30,
+                jwks: starry_config::JwksConfig {
+                    max_stale_seconds: 3_600,
+                    ..Default::default()
+                },
+                introspection: IntrospectionConfig::default(),
+            },
+            keys: RwLock::new(KeyState {
+                keys,
+                loaded_at_epoch_seconds: Some(epoch_seconds()),
+            }),
+            jwks_client: default_jwks_client(),
+            jwks_file: None,
+            introspection: None,
+            cancelled: AtomicBool::new(false),
+        },
+    }
+}
+
 
 fn epoch_seconds() -> u64 {
     SystemTime::now()
@@ -1442,6 +1550,97 @@ mod tests {
                 .verify_local_at(&fixture("active"), 1_893_456_000, None)
                 .unwrap_err(),
             "key_stale"
+        );
+    }
+
+    /// A file-published keyset with no remote endpoint used to be stamped only
+    /// at startup, so enforce mode rejected everything once the stamp aged
+    /// past max_stale_seconds. The local refresh path must clear that.
+    #[test]
+    fn file_published_keyset_refreshes_instead_of_going_stale() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jwks.json");
+        let raw = include_bytes!("../contracts/auth/v1/fixtures/jwks.json");
+        fs::write(&path, raw).unwrap();
+        write_jwks_cache(&path, raw, epoch_seconds()).unwrap();
+
+        let mut runtime = fixture_runtime();
+        runtime.jwks_file = Some(path.clone());
+        runtime.keys.write().unwrap().loaded_at_epoch_seconds =
+            Some(epoch_seconds().saturating_sub(3_601));
+        assert_eq!(
+            runtime
+                .verify_local_at(&fixture("active"), 1_893_456_000, None)
+                .unwrap_err(),
+            "key_stale"
+        );
+
+        let runtime = runtime;
+        let refreshed = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { runtime.reload_jwks_file(&path).await });
+        refreshed.unwrap();
+        assert!(
+            runtime
+                .verify_local_at(&fixture("active"), 1_893_456_000, None)
+                .is_ok(),
+            "a re-read keyset with a current issuer stamp must verify again"
+        );
+    }
+
+    /// The refresh must not launder freshness from the local clock: an
+    /// untouched keyset whose issuer stamp is old stays stale.
+    #[test]
+    fn file_refresh_never_launders_a_stale_keyset() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jwks.json");
+        let raw = include_bytes!("../contracts/auth/v1/fixtures/jwks.json");
+        fs::write(&path, raw).unwrap();
+        write_jwks_cache(&path, raw, epoch_seconds().saturating_sub(7_200)).unwrap();
+
+        let mut runtime = fixture_runtime();
+        runtime.jwks_file = Some(path.clone());
+        let runtime = runtime;
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { runtime.reload_jwks_file(&path).await })
+            .unwrap();
+        assert_eq!(
+            runtime
+                .verify_local_at(&fixture("active"), 1_893_456_000, None)
+                .unwrap_err(),
+            "key_stale"
+        );
+    }
+
+    /// A half-written keyset must never replace a working one.
+    #[test]
+    fn file_refresh_keeps_the_old_keyset_when_the_new_one_is_invalid() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jwks.json");
+        let good = include_bytes!("../contracts/auth/v1/fixtures/jwks.json");
+        fs::write(&path, good).unwrap();
+        write_jwks_cache(&path, good, epoch_seconds()).unwrap();
+
+        let mut runtime = fixture_runtime();
+        runtime.jwks_file = Some(path.clone());
+        let runtime = runtime;
+        fs::write(&path, b"{\"keys\":[]}").unwrap();
+        let outcome = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { runtime.reload_jwks_file(&path).await });
+        assert!(outcome.is_err());
+        assert!(
+            runtime
+                .verify_local_at(&fixture("active"), 1_893_456_000, None)
+                .is_ok(),
+            "the previously loaded keyset must survive a rejected refresh"
         );
     }
 

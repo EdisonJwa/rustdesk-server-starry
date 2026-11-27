@@ -1,5 +1,6 @@
 pub mod audit_log;
 mod allocation_explain;
+pub mod auth_server;
 mod connection_auth;
 pub mod config_downgrade;
 pub mod control_agent;
