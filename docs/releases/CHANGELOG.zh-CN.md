@@ -46,6 +46,13 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
   `STARRY_WEBRTC_SIGNAL=Y`，默认关闭）：沿有界的按连接路由转发 SDP offer/answer 与
   trickle ICE，只接受来自 Secure TCP 或 WebSocket 的 offer。见
   [WebRTC 信令](../reference/WEBRTC-SIGNALLING-v1.zh-CN.md)。
+- `starry-api`：RustDesk 兼容的 API 服务器（端口 21114），SQLite 账号
+  （bcrypt）、官方 1.5 客户端解析的契约（`/api/login-options`、`/api/login`、
+  `/api/currentUser`、`/api/logout`），以及被客户端原样当作信令凭据回传的
+  Ed25519 连接 token。发布 HBBS 校验所用的 JWKS（`connection_auth.jwks.file`）
+  及摘要绑定的新鲜度戳并按心跳续签；`starry-api user add|passwd|enable|disable|list`
+  管理账号，密码只接受来自 stdin 或环境变量。见
+  [认证服务器 v1](../reference/AUTH-SERVER-v1.zh-CN.md)。
 
 ### 在 Starry 重写的路径中保留上游 1.1.17 修复
 
@@ -62,6 +69,10 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 - 没有 Starry 配置文件且 `RUST_LOG` 高于 `info` 时，启动时不会初始化 Geo 规则和
   WebSocket Signal：这些调用写在 `log::info!` 参数里，该级别下参数不会被执行。
+- 以本地文件发布的 JWKS 原先只在启动时打一次戳，导致 `enforce` 模式的 HBBS 在
+  `max_stale_seconds`（默认 1 小时）之后对所有连接报 `key_stale`——即使签发者
+  一直健康。现在 HBBS 按刷新周期重读该文件并采纳签发者的戳，且无法解析的
+  keyset 绝不会替换正在工作的那一份。
 
 ### 安全
 

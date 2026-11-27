@@ -56,6 +56,15 @@ the official RustDesk Server version with the Starry patch version, for example
   `STARRY_WEBRTC_SIGNAL=Y`, default off): SDP offer/answer and trickle ICE
   along bounded per-connection routes, offers only from Secure TCP or
   WebSocket. See [WebRTC signalling](../reference/WEBRTC-SIGNALLING-v1.md).
+- `starry-api`: a RustDesk-compatible API server (port 21114) with SQLite
+  accounts (bcrypt), the contract the official 1.5 client parses
+  (`/api/login-options`, `/api/login`, `/api/currentUser`, `/api/logout`), and
+  Ed25519 connection tokens that clients replay verbatim as the rendezvous
+  credential. Publishes the JWKS HBBS verifies
+  (`connection_auth.jwks.file`) together with a digest-bound freshness stamp
+  renewed on a heartbeat; `starry-api user add|passwd|enable|disable|list`
+  manages accounts, with passwords accepted only from stdin or the environment.
+  See [Auth server v1](../reference/AUTH-SERVER-v1.md).
 
 ### Kept from upstream 1.1.17 inside Starry's rewritten paths
 
@@ -75,6 +84,11 @@ the official RustDesk Server version with the Starry patch version, for example
 - Geo rules and WebSocket Signal were not initialised at startup without a
   Starry config when `RUST_LOG` was above `info`: the calls sat inside
   `log::info!` arguments, which are skipped at that level.
+- A JWKS published as a local file was stamped only once at startup, so HBBS in
+  `enforce` mode reported `key_stale` for every connection after
+  `max_stale_seconds` (one hour by default) while the issuer was healthy. HBBS
+  now re-reads the file on its refresh interval and adopts the issuer's stamp,
+  and a keyset that does not parse never replaces a working one.
 
 ### Security
 

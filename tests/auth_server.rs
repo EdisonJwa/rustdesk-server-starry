@@ -152,6 +152,18 @@ fn http_get(url: &str) -> Option<(u16, String)> {
     }
 }
 
+fn http_get_with_bearer(url: &str, token: &str) -> (u16, String) {
+    let response = minreq::get(url)
+        .with_timeout(5)
+        .with_header("Authorization", format!("Bearer {token}"))
+        .send()
+        .expect("HTTP request failed");
+    (
+        u16::try_from(response.status_code).unwrap_or(0),
+        response.as_str().unwrap_or("").to_owned(),
+    )
+}
+
 fn http_post(url: &str, body: &Value) -> (u16, String) {
     http_post_bearer(url, body, None)
 }
@@ -334,6 +346,13 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
         Some(&token),
     );
     assert_eq!(status, 401, "a logged-out token must stop working");
+
+    // Address book: a literal null is the client's "no address book" reply.
+    let (status, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &login_token(&api));
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "null");
+    let (status, _) = http_get(&format!("{}/api/ab", api.base)).unwrap();
+    assert_eq!(status, 401);
 
     // Unknown endpoints answer JSON so clients never choke on HTML.
     let (status, body) = http_get(&format!("{}/api/nope", api.base)).unwrap();

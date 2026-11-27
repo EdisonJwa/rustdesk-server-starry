@@ -36,6 +36,7 @@ fields (`status`, `auth_version`, `extra_scopes`) they will need.
 | POST | `/api/logout` | Bearer | revokes the session; answers `null` |
 | POST | `/api/connection-token` | Bearer | `{token, expires_in}` — a shorter-lived JWT for scripts and non-official clients |
 | POST | `/api/introspect` | none | `{token}` → `{active, sub, reason}` (RFC 7662 shape, for HBBS's optional verifier) |
+| GET | `/api/ab` | Bearer | `null` — the client's own "no address book" reply, so the Address Book tab stays clean until P1 |
 | GET | `/healthz` | none | `{"status":"live"}` |
 
 Errors are `{"error": "<code>"}` with a non-2xx status, e.g.

@@ -32,6 +32,7 @@ TOTP 属 v1.1；用户表已备好所需字段（`status`、`auth_version`、`ex
 | POST | `/api/logout` | Bearer | 吊销会话；返回 `null` |
 | POST | `/api/connection-token` | Bearer | `{token, expires_in}` —— 供脚本与非官方客户端使用的短期 JWT |
 | POST | `/api/introspect` | 无 | `{token}` → `{active, sub, reason}`（RFC 7662 形态，供 HBBS 可选校验器） |
+| GET | `/api/ab` | Bearer | `null` —— 客户端约定的"无通讯录"回复，让通讯录页在 P1 之前保持干净 |
 | GET | `/healthz` | 无 | `{"status":"live"}` |
 
 错误统一为 `{"error": "<code>"}` 加非 2xx 状态，例如 `UsernameOrPasswordError`

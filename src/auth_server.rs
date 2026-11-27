@@ -901,6 +901,10 @@ fn router(state: Arc<ApiState>) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/connection-token", post(connection_token))
         .route("/api/introspect", post(introspect))
+        // The client treats a literal `null` as "no address book", which keeps
+        // the Address Book tab clean until P1 adds one. Without this route the
+        // tab renders a pull error right after the first login.
+        .route("/api/ab", get(empty_address_book))
         .fallback(axum::routing::any(unknown_endpoint))
         .layer(Extension(state))
 }
@@ -1126,6 +1130,19 @@ async fn introspect(
             Json(json!({"active": false, "sub": claims.sub, "reason": reason})).into_response()
         }
         Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "SystemError"),
+    }
+}
+
+async fn empty_address_book(
+    Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Response {
+    match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+        Ok(_) => Json(Value::Null).into_response(),
+        Err(AuthFailure::Unauthorized) => api_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
+        Err(AuthFailure::Unavailable) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
     }
 }
 
