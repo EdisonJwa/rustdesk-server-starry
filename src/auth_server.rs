@@ -1018,7 +1018,11 @@ async fn login(
 async fn current_user(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
+    body: RawBody<Body>,
 ) -> Response {
+    // The client sends {id, uuid} here; the payload is not needed, but leaving
+    // it unread can wedge a keep-alive connection.
+    let _ = read_json::<Value>(body).await;
     match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
         Ok((_, user)) => Json(user_payload(&user)).into_response(),
         Err(AuthFailure::Unauthorized) => api_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
@@ -1028,7 +1032,12 @@ async fn current_user(
     }
 }
 
-async fn logout(Extension(state): Extension<Arc<ApiState>>, headers: HeaderMap) -> Response {
+async fn logout(
+    Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: RawBody<Body>,
+) -> Response {
+    let _ = read_json::<Value>(body).await;
     let Some(token) = bearer(&headers) else {
         return api_error(StatusCode::UNAUTHORIZED, "Unauthorized");
     };
@@ -1046,7 +1055,9 @@ async fn logout(Extension(state): Extension<Arc<ApiState>>, headers: HeaderMap) 
 async fn connection_token(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
+    body: RawBody<Body>,
 ) -> Response {
+    let _ = read_json::<Value>(body).await;
     let token = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
         Ok((_, user)) => user,
         Err(AuthFailure::Unauthorized) => {
