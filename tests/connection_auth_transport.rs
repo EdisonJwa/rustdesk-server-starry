@@ -380,13 +380,20 @@ groups:
                 "connect:initiate connect:initiate:contractor",
             );
 
-            // A denied-group target must not reveal its existence.
+            // A denied-group target must not reveal its existence. Register it
+            // first: a refusal for an unregistered ID would prove nothing about
+            // the strategy branch.
+            let mut retired = register_native_peer(port, "retired-box").await;
             let denied_for_retired = native_exchange(port, punch_to("retired-box", &with_group_scope)).await;
             let denied_generic = native_exchange(port, punch_to("nobody-here", "")).await;
             assert_eq!(
                 denied_for_retired.write_to_bytes().unwrap(),
                 denied_generic.write_to_bytes().unwrap(),
                 "deny-group refusal must be indistinguishable from any other denial"
+            );
+            assert!(
+                retired.next_timeout(200).await.is_none(),
+                "a denied-group punch must not reach the registered target"
             );
 
             // A contractor target requires the group scope.

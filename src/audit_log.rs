@@ -578,6 +578,37 @@ fn json_unescape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A strategy `deny` never reaches `record_decision`, so it needs its own
+    /// recording path — and that path must produce the same evidence shape:
+    /// verdict `deny`, the group that refused, and the request kind.
+    #[test]
+    fn a_strategy_denial_records_the_verdict_and_the_group() {
+        // Build the event exactly as record_strategy_denial does, then assert on
+        // the serialized form so the test does not depend on the global writer.
+        let event = AuditEvent {
+            epoch_seconds: 1_700_000_000,
+            kind: ConnectionAttemptKind::PunchHole,
+            transport: SignalTransport::SecureTcp,
+            verdict: "deny",
+            reason: "strategy_group_denied".to_owned(),
+            client_ip: "192.0.2.9".to_owned(),
+            mode: mode_label(&ConnectionAuthMode::Enforce),
+            group: "retired".to_owned(),
+        };
+        let line = event.to_jsonl();
+        assert!(line.contains("\"verdict\":\"deny\""), "{line}");
+        assert!(line.contains("\"reason\":\"strategy_group_denied\""), "{line}");
+        assert!(line.contains("\"group\":\"retired\""), "{line}");
+        assert!(
+            line.contains("\"mode\":\"enforce\""),
+            "a group deny is unconditional, so it reports enforce: {line}"
+        );
+        // It must be readable back, not just well-formed on the way out.
+        let parsed = parse_event(line.trim_end()).expect("parse the denial event");
+        assert_eq!(parsed.group, "retired");
+        assert_eq!(parsed.verdict, "deny");
+    }
+
     #[test]
     fn jsonl_round_trip_survives_hostile_strings() {
         let event = AuditEvent {
