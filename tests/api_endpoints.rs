@@ -816,3 +816,188 @@ fn the_test_totp_agrees_with_the_server() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-account authorization
+//
+// Every earlier test in this file used one account, which is how a
+// `rule >= 1` predicate that every new book satisfied survived review. These
+// tests create a second and third account, because "can A see B's data" is not
+// expressible with one.
+// ---------------------------------------------------------------------------
+
+/// Creates an account with the CLI and returns its bearer token.
+fn create_account(api: &Api, name: &str, password: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_starry-api"))
+        .arg("user")
+        .arg("add")
+        .arg(name)
+        .arg("--display-name")
+        .arg(name)
+        .env("STARRY_API_DB", api.directory.join("users.db"))
+        .env("STARRY_API_BCRYPT_COST", "4")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("cannot run the account CLI");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(password.as_bytes())
+        .expect("cannot write the password");
+    let status = child.wait().expect("account CLI did not finish");
+    assert!(status.success(), "creating {name} failed");
+
+    let (status, body) = http_post_bearer(
+        &format!("{}/api/login", api.base),
+        Some(&json!({"username": name, "password": password, "id": "d", "uuid": "u"})),
+        None,
+    );
+    assert_eq!(status, 200, "{name} cannot log in: {body}");
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    parsed["access_token"].as_str().expect("a token").to_owned()
+}
+
+/// A book belongs to its owner. Another account must not be able to list,
+/// read or write it, and this test is the reason the authorization predicate
+/// cannot be `rule >= 1`.
+#[test]
+fn another_account_cannot_see_an_unshared_book() {
+    let _guard = gate();
+    let api = start_api_with("ab-privacy", &[]);
+    let owner = login(&api);
+
+    let (_, body) = http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&owner));
+    let guid = serde_json::from_str::<Value>(&body).unwrap()["guid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    http_post_bearer(
+        &format!("{}/api/ab/peer/add/{guid}", api.base),
+        Some(&json!({"id": "secret-host", "alias": "only-for-owner"})),
+        Some(&owner),
+    );
+
+    let intruder = create_account(&api, "mallory", "mallory-password-123");
+
+    // 1. It must not appear in the intruder's book list.
+    let (status, body) = http_post_bearer(
+        &format!("{}/api/ab/shared/profiles?current=1&pageSize=100", api.base),
+        None,
+        Some(&intruder),
+    );
+    assert_eq!(status, 200, "{body}");
+    let profiles: Value = serde_json::from_str(&body).unwrap();
+    let leaked = profiles["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|profile| profile["guid"] == guid.as_str());
+    assert!(
+        !leaked,
+        "another account's book was listed: {profiles}"
+    );
+
+    // 2. Peers must be a 404, not an empty list: an empty list would leak that
+    // the book exists.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/peers?current=1&pageSize=100&ab={guid}", api.base),
+        None,
+        Some(&intruder),
+    );
+    assert_eq!(status, 404, "reading another account's peers must be refused");
+
+    // 3. Tags likewise.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/tags/{guid}", api.base),
+        None,
+        Some(&intruder),
+    );
+    assert_eq!(status, 404);
+
+    // 4. Writing must be refused too, or the leak is worse than read-only.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/peer/add/{guid}", api.base),
+        Some(&json!({"id": "injected"})),
+        Some(&intruder),
+    );
+    assert_eq!(status, 404);
+
+    // 5. And the owner still sees their own peer.
+    let (_, body) = http_post_bearer(
+        &format!("{}/api/ab/peers?current=1&pageSize=100&ab={guid}", api.base),
+        None,
+        Some(&owner),
+    );
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["total"], 1, "the owner must still see their own book");
+}
+
+/// Sharing is explicit, capped by the book's ceiling, and revocable.
+#[test]
+fn sharing_grants_and_revokes_access_explicitly() {
+    let _guard = gate();
+    let api = start_api_with("ab-share", &[]);
+    let owner = login(&api);
+    let (_, body) = http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&owner));
+    let guid = serde_json::from_str::<Value>(&body).unwrap()["guid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    http_post_bearer(
+        &format!("{}/api/ab/peer/add/{guid}", api.base),
+        Some(&json!({"id": "shared-host"})),
+        Some(&owner),
+    );
+    let guest = create_account(&api, "guest", "guest-password-123");
+
+    // Only the owner may share. The guest trying to share the owner's book to
+    // itself must fail, or sharing would be self-service.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/share/{guid}", api.base),
+        Some(&json!({"user_id": 3, "rule": 3})),
+        Some(&guest),
+    );
+    assert_eq!(status, 404, "a non-owner must not be able to share");
+
+    // The owner shares read-only with the guest (id 2: admin is 1).
+    let (status, body) = http_post_bearer(
+        &format!("{}/api/ab/share/{guid}", api.base),
+        Some(&json!({"user_id": 2, "rule": 1})),
+        Some(&owner),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // The guest can now read...
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/peers?current=1&pageSize=100&ab={guid}", api.base),
+        None,
+        Some(&guest),
+    );
+    assert_eq!(status, 200, "a granted share must be readable");
+
+    // ...but not write, because the grant is read-only.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/peer/add/{guid}", api.base),
+        Some(&json!({"id": "guest-injected"})),
+        Some(&guest),
+    );
+    assert_eq!(status, 404, "a read-only share must not permit writes");
+
+    // Revoking takes it away again.
+    let (status, _) = http_delete_bearer(
+        &format!("{}/api/ab/share/{guid}", api.base),
+        &json!({"user_id": 2}),
+        &owner,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab/peers?current=1&pageSize=100&ab={guid}", api.base),
+        None,
+        Some(&guest),
+    );
+    assert_eq!(status, 404, "a revoked share must stop working immediately");
+}

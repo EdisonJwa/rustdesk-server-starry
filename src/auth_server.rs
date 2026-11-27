@@ -416,12 +416,26 @@ create table if not exists ab_books (
     owner_id integer not null,
     name text not null,
     note text not null default '',
-    -- ShareRule: 1 read, 2 read/write, 3 full control.
-    rule integer not null default 3,
+    -- ShareRule ceiling for anyone this book is shared with: 1 read,
+    -- 2 read/write, 3 full control. This is a *maximum*, never a grant: a book
+    -- with rule 3 is still invisible to everyone except its owner until a row in
+    -- ab_shares says otherwise.
+    rule integer not null default 1,
     personal integer not null default 1,
     created_at integer not null,
     updated_at integer not null
 );
+-- Explicit grants. A book is visible to a user only if this row exists, so the
+-- absence of a share cannot be confused with a condition evaluated elsewhere.
+-- The rule here is the granted level and may not exceed the book's own ceiling.
+create table if not exists ab_shares (
+    guid text not null,
+    user_id integer not null,
+    rule integer not null default 1,
+    created_at integer not null,
+    primary key (guid, user_id)
+);
+create index if not exists ab_shares_user on ab_shares (user_id);
 create index if not exists ab_books_owner on ab_books (owner_id);
 create table if not exists ab_peers (
     guid text not null,
@@ -1584,6 +1598,15 @@ fn router(state: Arc<ApiState>) -> Router {
             "/api/ab/tag/:guid",
             axum::routing::delete(crate::address_book::tag_delete),
         )
+        // Sharing. Required for the structured book to be usable by more than one
+        // account; without it `ab_shares` would always be empty and every book
+        // would be owner-only.
+        .route("/api/ab/share/:guid", post(crate::address_book::share))
+        .route(
+            "/api/ab/share/:guid",
+            axum::routing::delete(crate::address_book::unshare),
+        )
+        .route("/api/ab/share/:guid", get(crate::address_book::list_shares))
         .route(
             "/api/device-group/accessible",
             get(crate::directory::device_groups),

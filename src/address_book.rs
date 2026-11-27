@@ -117,20 +117,25 @@ impl Page {
 // Data access
 // ---------------------------------------------------------------------------
 
-/// Loads the books an account may see: its own personal book plus any book
-/// explicitly marked readable.
+/// Loads the books an account may see.
 ///
-/// A book is visible when the caller owns it or its `rule` grants access. v1
-/// models sharing as "rule >= read", which matches what the client can express;
-/// per-user sharing lists are a later concern.
+/// Visibility requires either ownership or an explicit `ab_shares` row. The
+/// book's own `rule` is a ceiling on the level a share may grant, never a grant
+/// itself: an earlier version tested `rule >= 1` here, which every new book
+/// satisfied (the default was 3), so any signed-in account could list and read
+/// every other account's address book.
 pub(crate) async fn books_for(state: &ApiState, user_id: i64) -> Result<Vec<BookProfile>, String> {
     let owner = state.user_name(user_id).await?;
     state
         .db_call(move |connection| {
             let mut statement = connection.prepare(
-                "select guid, name, note, rule from ab_books
-                 where owner_id = ?1 or rule >= 1
-                 order by personal desc, name asc",
+                "select b.guid, b.name, b.note,
+                        case when b.owner_id = ?1 then b.rule
+                             else min(b.rule, s.rule) end as effective_rule
+                 from ab_books b
+                 left join ab_shares s on s.guid = b.guid and s.user_id = ?1
+                 where b.owner_id = ?1 or s.user_id = ?1
+                 order by b.personal desc, b.name asc",
             )?;
             let mut rows = statement.query([user_id])?;
             let mut books = Vec::new();
@@ -179,14 +184,22 @@ pub(crate) async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Resu
         .await
 }
 
-/// Whether the caller may write to a book. `rule` of 1 is read-only.
+/// Whether the caller may write to a book.
+///
+/// Writing needs ownership or a share granting at least read/write, capped by the
+/// book's own ceiling. A book shared read-only stays read-only for the recipient
+/// even if the share row were later raised.
 pub(crate) async fn may_write(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
             let rule = connection
                 .query_row(
-                    "select rule from ab_books where guid = ?1 and (owner_id = ?2 or rule >= 2)",
+                    "select 1 from ab_books b
+                 left join ab_shares s on s.guid = b.guid and s.user_id = ?2
+                 where b.guid = ?1
+                   and (b.owner_id = ?2
+                        or (s.user_id = ?2 and min(b.rule, s.rule) >= 2))",
                     rusqlite::params![guid, user_id],
                     |row| row.get::<_, i64>(0),
                 )
@@ -252,13 +265,16 @@ pub(crate) async fn peers_in_book(
         .await
 }
 
+/// Whether the caller may read a book: ownership or any share row.
 async fn may_read(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
             let exists = connection
                 .query_row(
-                    "select 1 from ab_books where guid = ?1 and (owner_id = ?2 or rule >= 1)",
+                    "select 1 from ab_books b
+                     left join ab_shares s on s.guid = b.guid and s.user_id = ?2
+                     where b.guid = ?1 and (b.owner_id = ?2 or s.user_id = ?2)",
                     rusqlite::params![guid, user_id],
                     |_| Ok(()),
                 )
@@ -431,6 +447,106 @@ pub(crate) async fn delete_tags(state: &ApiState, guid: &str, names: Vec<String>
                 )? as u64;
             }
             Ok::<_, rusqlite::Error>(removed)
+        })
+        .await
+}
+
+/// Grants another account access to a book.
+///
+/// Only the owner may share, and the granted level is capped by the book's own
+/// ceiling. Returns whether a row was written.
+pub(crate) async fn share_book(
+    state: &ApiState,
+    owner_id: i64,
+    guid: &str,
+    target_id: i64,
+    rule: i64,
+) -> Result<bool, String> {
+    if owner_id == target_id {
+        // Sharing with yourself is a no-op; the owner already has full access.
+        return Ok(false);
+    }
+    let guid = guid.to_owned();
+    state
+        .db_call(move |connection| {
+            let ceiling = connection
+                .query_row(
+                    "select rule from ab_books where guid = ?1 and owner_id = ?2",
+                    rusqlite::params![guid, owner_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok();
+            let Some(ceiling) = ceiling else {
+                return Ok(false);
+            };
+            let granted = rule.clamp(1, ceiling.max(1));
+            connection.execute(
+                "insert into ab_shares (guid, user_id, rule, created_at)
+                 values (?1, ?2, ?3, ?4)
+                 on conflict(guid, user_id) do update set rule = excluded.rule",
+                rusqlite::params![guid, target_id, granted, epoch_seconds() as i64],
+            )?;
+            Ok(true)
+        })
+        .await
+}
+
+/// Revokes a share. Only the owner may revoke.
+pub(crate) async fn unshare_book(
+    state: &ApiState,
+    owner_id: i64,
+    guid: &str,
+    target_id: i64,
+) -> Result<bool, String> {
+    let guid = guid.to_owned();
+    state
+        .db_call(move |connection| {
+            let owned = connection
+                .query_row(
+                    "select 1 from ab_books where guid = ?1 and owner_id = ?2",
+                    rusqlite::params![guid, owner_id],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            if !owned {
+                return Ok(false);
+            }
+            let removed = connection.execute(
+                "delete from ab_shares where guid = ?1 and user_id = ?2",
+                rusqlite::params![guid, target_id],
+            )?;
+            Ok(removed > 0)
+        })
+        .await
+}
+
+/// Who a book is shared with, for the owner's view.
+pub(crate) async fn shares_of(
+    state: &ApiState,
+    owner_id: i64,
+    guid: &str,
+) -> Result<Vec<(i64, i64)>, String> {
+    let guid = guid.to_owned();
+    state
+        .db_call(move |connection| {
+            let owned = connection
+                .query_row(
+                    "select 1 from ab_books where guid = ?1 and owner_id = ?2",
+                    rusqlite::params![guid, owner_id],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            if !owned {
+                return Ok(Vec::new());
+            }
+            let mut statement =
+                connection.prepare("select user_id, rule from ab_shares where guid = ?1")?;
+            let mut rows = statement.query([guid.as_str()])?;
+            let mut shares = Vec::new();
+            while let Some(row) = rows.next()? {
+                shares.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
+            }
+            Ok(shares)
         })
         .await
 }
@@ -888,6 +1004,92 @@ pub(crate) async fn tag_delete(
         Ok(_) => Json(Value::Null).into_response(),
         Err(err) => {
             log::error!("cannot delete tags: {err}");
+            crate::auth_server::api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+struct ShareRequest {
+    /// The account to share with.
+    user_id: i64,
+    /// 1 read, 2 read/write, 3 full control. Capped by the book's ceiling.
+    rule: i64,
+}
+
+/// `POST /api/ab/share/{guid}` — share a book the caller owns.
+pub(crate) async fn share(
+    Extension(state): Extension<Arc<ApiState>>,
+    AxumPath(guid): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    body: RawBody<Body>,
+) -> Response {
+    let owner = match state.authenticate_headers(&headers).await {
+        Ok(user_id) => user_id,
+        Err(auth) => return unauthorized(auth),
+    };
+    let Some(request) = optional_json::<ShareRequest>(body).await else {
+        return crate::auth_server::api_error(StatusCode::BAD_REQUEST, "ParamsError");
+    };
+    if request.user_id <= 0 {
+        return crate::auth_server::api_error(StatusCode::BAD_REQUEST, "ParamsError");
+    }
+    match share_book(&state, owner, &guid, request.user_id, request.rule).await {
+        Ok(true) => Json(Value::Null).into_response(),
+        // Only the owner may share, so "not yours" and "no such book" answer the
+        // same way rather than revealing which.
+        Ok(false) => book_error("BookNotFound"),
+        Err(err) => {
+            log::error!("cannot share a book: {err}");
+            crate::auth_server::api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    }
+}
+
+/// `DELETE /api/ab/share/{guid}` — revoke a share.
+pub(crate) async fn unshare(
+    Extension(state): Extension<Arc<ApiState>>,
+    AxumPath(guid): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    body: RawBody<Body>,
+) -> Response {
+    let owner = match state.authenticate_headers(&headers).await {
+        Ok(user_id) => user_id,
+        Err(auth) => return unauthorized(auth),
+    };
+    let Some(request) = optional_json::<ShareRequest>(body).await else {
+        return crate::auth_server::api_error(StatusCode::BAD_REQUEST, "ParamsError");
+    };
+    match unshare_book(&state, owner, &guid, request.user_id).await {
+        Ok(changed) => Json(json!({"revoked": changed})).into_response(),
+        Err(err) => {
+            log::error!("cannot revoke a share: {err}");
+            crate::auth_server::api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    }
+}
+
+/// `GET /api/ab/share/{guid}` — who the caller's book is shared with.
+pub(crate) async fn list_shares(
+    Extension(state): Extension<Arc<ApiState>>,
+    AxumPath(guid): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let owner = match state.authenticate_headers(&headers).await {
+        Ok(user_id) => user_id,
+        Err(auth) => return unauthorized(auth),
+    };
+    match shares_of(&state, owner, &guid).await {
+        Ok(shares) => Json(json!({
+            "shares": shares
+                .into_iter()
+                .map(|(user_id, rule)| json!({"user_id": user_id, "rule": rule}))
+                .collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(err) => {
+            log::error!("cannot list shares: {err}");
             crate::auth_server::api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
         }
     }
