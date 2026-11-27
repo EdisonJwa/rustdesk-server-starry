@@ -89,6 +89,14 @@ the official RustDesk Server version with the Starry patch version, for example
   `max_stale_seconds` (one hour by default) while the issuer was healthy. HBBS
   now re-reads the file on its refresh interval and adopts the issuer's stamp,
   and a keyset that does not parse never replaces a working one.
+- A `RequestRelay` from a client whose relay field was empty (the documented
+  setup) carried no relay address, because the server only supplied one when
+  fast_relay was enabled. The peer had nowhere to dial, so every connection that
+  needed a relay failed with the client's "deadline has elapsed" while neither
+  relay logged a thing. The server now fills a blank client value and still
+  overrides a client-supplied one when fast_relay owns the choice.
+- Relay reachability was probed only when more than one relay was configured, so
+  a single-relay deployment could leave its only relay unmarked.
 
 ### Security
 
@@ -208,7 +216,7 @@ Release notes: [`RELEASE-NOTES-patch-v1.3.0.md`](RELEASE-NOTES-patch-v1.3.0.md)
 
 ## patch-v1.2.2 — 2026-08-29
 
-Release notes: [`RELEASE-NOTES-patch-v1.2.2.md`](RELEASE-NOTES-patch-v1.2.2.md)
+Release notes: [`RELEASE-NOTES-patch-v1.2.2.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.2.md)
 
 ### Added
 
@@ -218,7 +226,7 @@ Release notes: [`RELEASE-NOTES-patch-v1.2.2.md`](RELEASE-NOTES-patch-v1.2.2.md)
 
 ## patch-v1.2.1 — 2026-08-28
 
-Release notes: [`RELEASE-NOTES-patch-v1.2.1.md`](RELEASE-NOTES-patch-v1.2.1.md)
+Release notes: [`RELEASE-NOTES-patch-v1.2.1.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.1.md)
 
 ### Added
 
@@ -227,7 +235,7 @@ Release notes: [`RELEASE-NOTES-patch-v1.2.1.md`](RELEASE-NOTES-patch-v1.2.1.md)
 
 ## patch-v1.2.0 — 2026-08-20
 
-Release notes: [`RELEASE-NOTES-patch-v1.2.0.md`](RELEASE-NOTES-patch-v1.2.0.md)
+Release notes: [`RELEASE-NOTES-patch-v1.2.0.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.0.md)
 
 ### Added
 
@@ -295,7 +303,7 @@ Release notes: [`RELEASE-NOTES-patch-v1.2.0.md`](RELEASE-NOTES-patch-v1.2.0.md)
 
 ## patch-v1.1.0
 
-Release notes: [`RELEASE-NOTES-patch-v1.1.0.md`](RELEASE-NOTES-patch-v1.1.0.md)
+Release notes: [`RELEASE-NOTES-patch-v1.1.0.md`](../archive/releases/RELEASE-NOTES-patch-v1.1.0.md)
 
 ### Added
 

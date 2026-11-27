@@ -73,6 +73,13 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
   `max_stale_seconds`（默认 1 小时）之后对所有连接报 `key_stale`——即使签发者
   一直健康。现在 HBBS 按刷新周期重读该文件并采纳签发者的戳，且无法解析的
   keyset 绝不会替换正在工作的那一份。
+- 中继字段留空（文档推荐配置）的客户端发出的 `RequestRelay` 不带中继地址：
+  服务端原先只在 fast_relay 开启时才补地址，于是被控端无处可连，所有需要中继
+  的连接都以客户端的 "deadline has elapsed" 失败，而两台 hbbr 的日志里什么都
+  没有。现在只要客户端留空就由服务端补齐；fast_relay 接管选路时仍覆盖客户端
+  自带的值。
+- 中继可达性探测原先只在配置了多于一个中继时才执行，单中继部署的唯一中继可能
+  一直不被标记为在线。
 
 ### 安全
 
@@ -175,7 +182,7 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ## patch-v1.2.2 — 2026-08-29
 
-完整说明：[`RELEASE-NOTES-patch-v1.2.2.zh-CN.md`](RELEASE-NOTES-patch-v1.2.2.zh-CN.md)
+完整说明：[`RELEASE-NOTES-patch-v1.2.2.zh-CN.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.2.zh-CN.md)
 
 ### 新增
 
@@ -185,7 +192,7 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ## patch-v1.2.1 — 2026-08-28
 
-完整说明：[`RELEASE-NOTES-patch-v1.2.1.zh-CN.md`](RELEASE-NOTES-patch-v1.2.1.zh-CN.md)
+完整说明：[`RELEASE-NOTES-patch-v1.2.1.zh-CN.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.1.zh-CN.md)
 
 ### 新增
 
@@ -194,7 +201,7 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ## patch-v1.2.0 — 2026-08-20
 
-完整说明：[`RELEASE-NOTES-patch-v1.2.0.zh-CN.md`](RELEASE-NOTES-patch-v1.2.0.zh-CN.md)
+完整说明：[`RELEASE-NOTES-patch-v1.2.0.zh-CN.md`](../archive/releases/RELEASE-NOTES-patch-v1.2.0.zh-CN.md)
 
 ### 新增
 
@@ -248,7 +255,7 @@ patch 版本组合，例如 `1.1.16-patch-v1.3.1`。
 
 ## patch-v1.1.0
 
-完整说明：[`RELEASE-NOTES-patch-v1.1.0.zh-CN.md`](RELEASE-NOTES-patch-v1.1.0.zh-CN.md)
+完整说明：[`RELEASE-NOTES-patch-v1.1.0.zh-CN.md`](../archive/releases/RELEASE-NOTES-patch-v1.1.0.zh-CN.md)
 
 ### 新增
 
