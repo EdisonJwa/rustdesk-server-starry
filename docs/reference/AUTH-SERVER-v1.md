@@ -82,6 +82,10 @@ comparison so response timing does not reveal whether an account exists.
 
 ## Deployment
 
+`deploy/systemd/install-starry-api.sh` installs the binary, seeds the admin
+account, drops `starry-api.service`, and restarts both units; the unit itself
+(`deploy/systemd/starry-api.service`) documents every environment knob.
+
 Run `starry-api.service` next to HBBS. The first boot writes the JWKS, which
 is what HBBS verifies against:
 

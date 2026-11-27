@@ -76,6 +76,10 @@ starry-api user disable alice    # status 0 + bump auth_version
 
 ## 部署
 
+`deploy/systemd/install-starry-api.sh` 负责安装二进制、初始化 admin 账号、落盘
+`starry-api.service` 并重启两个单元；单元文件本身
+（`deploy/systemd/starry-api.service`）注释了每个环境变量。
+
 与 HBBS 并列运行 `starry-api.service`。首启写出的 JWKS 就是 HBBS 的校验目标：
 
 ```yaml

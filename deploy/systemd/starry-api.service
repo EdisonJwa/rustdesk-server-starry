@@ -1,0 +1,31 @@
+[Unit]
+Description=Starry API (RustDesk-compatible accounts and connection tokens)
+Documentation=https://github.com/EdisonJwa/rustdesk-server-starry/blob/standalone-dev/docs/reference/AUTH-SERVER-v1.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/var/lib/starry/api
+Environment=RUST_LOG=info
+# Loopback only. The login endpoint carries passwords, so a TLS terminator must
+# sit in front before clients are pointed at this address; set
+# STARRY_API_TRUST_PROXY=1 when that proxy forwards X-Forwarded-For.
+Environment=STARRY_API_LISTEN=127.0.0.1:21114
+Environment=STARRY_API_DB=/var/lib/starry/api/users.db
+Environment=STARRY_API_KEY_FILE=/var/lib/starry/api/api-signing-key
+# This file is what hbbs verifies: point connection_auth.jwks.file at the same
+# path. A digest-bound <file>.metadata.json freshness stamp is written beside it
+# and renewed every jwks heartbeat.
+Environment=STARRY_API_JWKS_FILE=/var/lib/starry/data/starry/auth/jwks.json
+# Must equal hbbs connection_auth.issuer / audience exactly.
+Environment=STARRY_API_ISSUER=https://starry-audit-observer.local
+Environment=STARRY_API_AUDIENCE=rustdesk-connect
+Environment=STARRY_API_SCOPE=connect:initiate
+Environment=STARRY_API_JWKS_HEARTBEAT_SECONDS=300
+Environment=STARRY_API_BCRYPT_COST=12
+ExecStart=/opt/starry/bin/starry-api serve
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
