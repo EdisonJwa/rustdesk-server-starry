@@ -57,7 +57,9 @@ static TRANSPORT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn jwt_enforcement_covers_native_secure_tcp_websocket_and_udp_stays_unsupported() {
-    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = TRANSPORT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Builder::new_current_thread()
         .enable_all()
         .build()
@@ -195,7 +197,9 @@ fn jwt_enforcement_covers_native_secure_tcp_websocket_and_udp_stays_unsupported(
 
 #[test]
 fn audit_events_reach_jsonl_for_real_connections() {
-    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = TRANSPORT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Builder::new_current_thread()
         .enable_all()
         .build()
@@ -245,7 +249,10 @@ fn audit_events_reach_jsonl_for_real_connections() {
                 .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap();
-            let _server = ServerProcess { child, state_dir: state_dir.clone() };
+            let _server = ServerProcess {
+                child,
+                state_dir: state_dir.clone(),
+            };
             wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port))).await;
             wait_until_listening(SocketAddr::from(([127, 0, 0, 1], port + 2))).await;
 
@@ -271,25 +278,34 @@ fn audit_events_reach_jsonl_for_real_connections() {
                     let content = fs::read_to_string(entry.path()).unwrap();
                     jsonl_lines.extend(content.lines().map(|line| line.to_owned()));
                 }
-                let has_denied = jsonl_lines
-                    .iter()
-                    .any(|line| line.contains("\"kind\":\"punch_hole\"") && line.contains("\"verdict\":\"deny\""));
-                let has_allowed = jsonl_lines
-                    .iter()
-                    .any(|line| line.contains("\"kind\":\"request_relay\"") && line.contains("\"verdict\":\"allow\""));
+                let has_denied = jsonl_lines.iter().any(|line| {
+                    line.contains("\"kind\":\"punch_hole\"")
+                        && line.contains("\"verdict\":\"deny\"")
+                });
+                let has_allowed = jsonl_lines.iter().any(|line| {
+                    line.contains("\"kind\":\"request_relay\"")
+                        && line.contains("\"verdict\":\"allow\"")
+                });
                 if has_denied && has_allowed {
                     break;
                 }
                 sleep(Duration::from_millis(50)).await;
             }
-            let has_denied = jsonl_lines
-                .iter()
-                .any(|line| line.contains("\"kind\":\"punch_hole\"") && line.contains("\"verdict\":\"deny\""));
-            let has_allowed = jsonl_lines
-                .iter()
-                .any(|line| line.contains("\"kind\":\"request_relay\"") && line.contains("\"verdict\":\"allow\""));
-            assert!(has_denied, "denied punch hole must be logged: {jsonl_lines:?}");
-            assert!(has_allowed, "allowed relay request must be logged: {jsonl_lines:?}");
+            let has_denied = jsonl_lines.iter().any(|line| {
+                line.contains("\"kind\":\"punch_hole\"") && line.contains("\"verdict\":\"deny\"")
+            });
+            let has_allowed = jsonl_lines.iter().any(|line| {
+                line.contains("\"kind\":\"request_relay\"")
+                    && line.contains("\"verdict\":\"allow\"")
+            });
+            assert!(
+                has_denied,
+                "denied punch hole must be logged: {jsonl_lines:?}"
+            );
+            assert!(
+                has_allowed,
+                "allowed relay request must be logged: {jsonl_lines:?}"
+            );
             for line in &jsonl_lines {
                 // The listener reports IPv4 clients in either dotted or
                 // IPv4-mapped IPv6 form depending on the socket family.
@@ -308,7 +324,9 @@ fn audit_events_reach_jsonl_for_real_connections() {
 
 #[test]
 fn strategy_groups_enforce_scope_and_deny_without_leaking_existence() {
-    let _guard = TRANSPORT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = TRANSPORT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Builder::new_current_thread()
         .enable_all()
         .build()
@@ -316,10 +334,8 @@ fn strategy_groups_enforce_scope_and_deny_without_leaking_existence() {
         .block_on(async {
             sodiumoxide::init().unwrap();
             let port = reserve_hbbs_ports();
-            let state_dir = std::env::temp_dir().join(format!(
-                "starry-strategy-{}-{port}",
-                std::process::id()
-            ));
+            let state_dir =
+                std::env::temp_dir().join(format!("starry-strategy-{}-{port}", std::process::id()));
             let _ = fs::remove_dir_all(&state_dir);
             fs::create_dir_all(state_dir.join("auth")).unwrap();
             let strategy_dir = state_dir.join("strategy");
@@ -384,7 +400,8 @@ groups:
             // first: a refusal for an unregistered ID would prove nothing about
             // the strategy branch.
             let mut retired = register_native_peer(port, "retired-box").await;
-            let denied_for_retired = native_exchange(port, punch_to("retired-box", &with_group_scope)).await;
+            let denied_for_retired =
+                native_exchange(port, punch_to("retired-box", &with_group_scope)).await;
             let denied_generic = native_exchange(port, punch_to("nobody-here", "")).await;
             assert_eq!(
                 denied_for_retired.write_to_bytes().unwrap(),
@@ -408,11 +425,8 @@ groups:
             let accepted = native_exchange(port, punch_to(contractor_id, &with_group_scope)).await;
             assert_normal_protocol_result(accepted);
             // The relay path proves the same group-scope allowance end to end.
-            native_request_relay_is_not_denied(
-                port,
-                relay_to(contractor_id, &with_group_scope),
-            )
-            .await;
+            native_request_relay_is_not_denied(port, relay_to(contractor_id, &with_group_scope))
+                .await;
         });
 }
 

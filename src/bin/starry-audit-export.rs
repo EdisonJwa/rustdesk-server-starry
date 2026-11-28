@@ -169,12 +169,10 @@ fn file_day_from_name(name: &str) -> u64 {
         .and_then(|rest| rest.strip_suffix(".jsonl"))
         .unwrap_or_default();
     match (stem.get(0..4), stem.get(4..6), stem.get(6..8)) {
-        (Some(year), Some(month), Some(day)) => {
-            match days_from_civil_parsed(year, month, day) {
-                Some(day) => day as u64,
-                None => 0,
-            }
-        }
+        (Some(year), Some(month), Some(day)) => match days_from_civil_parsed(year, month, day) {
+            Some(day) => day as u64,
+            None => 0,
+        },
         _ => 0,
     }
 }

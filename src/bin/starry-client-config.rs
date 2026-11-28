@@ -11,12 +11,7 @@
 //! belong to the operator's identity provider, not to this server.
 
 use serde_json::json;
-use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
-    process::ExitCode,
-};
+use std::{fs, io::Write, path::PathBuf, process::ExitCode};
 
 struct Args {
     data_dir: PathBuf,
@@ -101,7 +96,6 @@ fn main() -> ExitCode {
         }
     };
 
-
     let import_json = json!({
         "host": args.id_server,
         "relay": args.relay_server,
@@ -110,12 +104,11 @@ fn main() -> ExitCode {
     });
     // Wire format: base64(JSON) with the whole string reversed, so scanners
     // do not recognise it as base64. Clients reverse, decode, then parse.
-    let import_string: String = base64::encode(
-        serde_json::to_vec(&import_json).expect("serialize import config"),
-    )
-    .chars()
-    .rev()
-    .collect();
+    let import_string: String =
+        base64::encode(serde_json::to_vec(&import_json).expect("serialize import config"))
+            .chars()
+            .rev()
+            .collect();
 
     let rendered = match args.format {
         Format::Json => serde_json::to_string_pretty(&json!({
@@ -143,7 +136,8 @@ fn main() -> ExitCode {
                 ));
             }
             text
-        }    };
+        }
+    };
 
     let write_result = match &args.out {
         Some(path) => fs::write(path, rendered.as_bytes()),

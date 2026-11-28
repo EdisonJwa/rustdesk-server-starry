@@ -269,7 +269,12 @@ impl AuthRuntime {
         (keys.keys.len(), age, stale)
     }
 
-    fn verify_local_at(&self, token: &str, now: u64, required_scope_override: Option<&str>) -> Result<LocalClaims, &'static str> {
+    fn verify_local_at(
+        &self,
+        token: &str,
+        now: u64,
+        required_scope_override: Option<&str>,
+    ) -> Result<LocalClaims, &'static str> {
         if token.is_empty() {
             return Err("missing_token");
         }
@@ -326,8 +331,7 @@ impl AuthRuntime {
         if claims.token_use != self.config.token_use {
             return Err("wrong_token_use");
         }
-        let required_scope = required_scope_override
-            .unwrap_or(self.config.required_scope.as_str());
+        let required_scope = required_scope_override.unwrap_or(self.config.required_scope.as_str());
         if !claims.scope.contains(required_scope) {
             return Err(if required_scope_override.is_some() {
                 "missing_group_scope"
@@ -748,7 +752,9 @@ async fn authorize_connection_attempt_inner(
         };
     }
     let now = epoch_seconds();
-    let result = runtime.authorize_at(token, now, required_scope_override).await;
+    let result = runtime
+        .authorize_at(token, now, required_scope_override)
+        .await;
     match (runtime.effective_mode, result) {
         (_, Ok(())) => {
             METRICS.allowed.fetch_add(1, Ordering::Relaxed);
@@ -1302,7 +1308,6 @@ pub(crate) fn test_verifier(
     }
 }
 
-
 fn epoch_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1412,7 +1417,9 @@ mod tests {
                 let mut mutated = active.as_bytes().to_vec();
                 mutated[index] ^= 1 << bit;
                 let mutated = String::from_utf8_lossy(&mutated);
-                assert!(runtime.verify_local_at(&mutated, 1_893_456_000, None).is_err());
+                assert!(runtime
+                    .verify_local_at(&mutated, 1_893_456_000, None)
+                    .is_err());
             }
         }
 
@@ -1459,7 +1466,9 @@ mod tests {
             "malformed_token"
         );
         assert_eq!(
-            runtime.verify_local_at("not-a-jwt", 1_100, None).unwrap_err(),
+            runtime
+                .verify_local_at("not-a-jwt", 1_100, None)
+                .unwrap_err(),
             "malformed_token"
         );
         assert_eq!(
@@ -1474,7 +1483,11 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .verify_local_at(&signed_token(&secret, "EdDSA", None, &valid_claims), 1_100, None)
+                .verify_local_at(
+                    &signed_token(&secret, "EdDSA", None, &valid_claims),
+                    1_100,
+                    None
+                )
                 .unwrap_err(),
             "unknown_kid"
         );
@@ -1515,7 +1528,10 @@ mod tests {
             let mut claims = valid_claims.clone();
             claims[field] = value;
             let token = signed_token(&secret, "EdDSA", Some("generated-key"), &claims);
-            assert_eq!(runtime.verify_local_at(&token, 1_100, None).unwrap_err(), reason);
+            assert_eq!(
+                runtime.verify_local_at(&token, 1_100, None).unwrap_err(),
+                reason
+            );
         }
 
         let mut malformed_window = valid_claims;

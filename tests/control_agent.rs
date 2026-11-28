@@ -1555,7 +1555,10 @@ fn durable_filesystem(path: &Path) -> bool {
                 best = Some((mountpoint.len(), filesystem));
             }
         }
-        !matches!(best.map(|(_, filesystem)| filesystem), Some("overlay" | "tmpfs"))
+        !matches!(
+            best.map(|(_, filesystem)| filesystem),
+            Some("overlay" | "tmpfs")
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
