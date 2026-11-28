@@ -98,10 +98,15 @@ impl ApiConfig {
             audience: env_or("STARRY_API_AUDIENCE", "rustdesk-connect"),
             base_scope: env_or("STARRY_API_SCOPE", "connect:initiate"),
             token_ttl_seconds: env_u64("STARRY_API_TOKEN_TTL_SECONDS", 604_800)?,
-            connection_token_ttl_seconds: env_u64("STARRY_API_CONNECTION_TOKEN_TTL_SECONDS", 3_600)?,
+            connection_token_ttl_seconds: env_u64(
+                "STARRY_API_CONNECTION_TOKEN_TTL_SECONDS",
+                3_600,
+            )?,
             jwks_heartbeat_seconds: env_u64("STARRY_API_JWKS_HEARTBEAT_SECONDS", 300)?,
             bcrypt_cost: env_u64("STARRY_API_BCRYPT_COST", 12)? as u32,
-            admin_password: std::env::var("ADMIN_PASSWORD").ok().filter(|p| !p.is_empty()),
+            admin_password: std::env::var("ADMIN_PASSWORD")
+                .ok()
+                .filter(|p| !p.is_empty()),
             trust_proxy: env_or("STARRY_API_TRUST_PROXY", "0") == "1",
         };
         config.validate()?;
@@ -165,7 +170,8 @@ fn absolute_path(value: String) -> Result<PathBuf, String> {
 /// hbbs refuses any issuer that is not a plain HTTPS URL, and the token `iss`
 /// must match its configured value exactly, so catch the mistake here.
 fn validate_issuer(issuer: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(issuer).map_err(|err| format!("STARRY_API_ISSUER is invalid: {err}"))?;
+    let parsed =
+        url::Url::parse(issuer).map_err(|err| format!("STARRY_API_ISSUER is invalid: {err}"))?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -195,8 +201,12 @@ impl SigningKey {
             Ok(contents) => {
                 let raw = decode_config(contents.trim(), base64::STANDARD)
                     .map_err(|_| format!("signing key {} is not valid base64", path.display()))?;
-                sign::SecretKey::from_slice(&raw)
-                    .ok_or_else(|| format!("signing key {} is not a 64-byte Ed25519 key", path.display()))?
+                sign::SecretKey::from_slice(&raw).ok_or_else(|| {
+                    format!(
+                        "signing key {} is not a 64-byte Ed25519 key",
+                        path.display()
+                    )
+                })?
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let (public, secret) = sign::gen_keypair();
@@ -246,7 +256,11 @@ impl SigningKey {
 /// still changing if the operator rotates the key file.
 fn kid_for(public: &[u8]) -> String {
     let digest = Sha256::digest(public);
-    let hex: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("starry-api-{hex}")
 }
 
@@ -654,7 +668,8 @@ fn apply_migrations(connection: &rusqlite::Connection) -> Result<(), String> {
                 |row| row.get(0),
             )
             .map_err(|err| format!("cannot inspect the shape of {table}: {err}"))?;
-        let exists = columns.contains(&format!(" {column} ")) || columns.contains(&format!("({column} "));
+        let exists =
+            columns.contains(&format!(" {column} ")) || columns.contains(&format!("({column} "));
         if exists {
             continue;
         }
@@ -780,7 +795,9 @@ pub fn set_user_status(
     Ok(())
 }
 
-pub fn list_users(connection: &rusqlite::Connection) -> Result<Vec<(String, bool, bool, i64)>, String> {
+pub fn list_users(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<(String, bool, bool, i64)>, String> {
     let mut statement = connection
         .prepare("select name, status, is_admin, auth_version from users order by id")
         .map_err(|err| err.to_string())?;
@@ -837,7 +854,9 @@ fn validate_user_fields(name: &str, password: &str) -> Result<(), String> {
         .chars()
         .any(|c| c.is_whitespace() || c.is_control() || c == '/' || c == '\\')
     {
-        return Err("user name must not contain whitespace, path separators, or controls".to_owned());
+        return Err(
+            "user name must not contain whitespace, path separators, or controls".to_owned(),
+        );
     }
     if password.len() < 8 {
         return Err("password must be at least 8 characters".to_owned());
@@ -890,7 +909,9 @@ impl Audience {
 impl Scope {
     fn contains(&self, expected: &str) -> bool {
         match self {
-            Self::Text(value) => value.split_ascii_whitespace().any(|value| value == expected),
+            Self::Text(value) => value
+                .split_ascii_whitespace()
+                .any(|value| value == expected),
             Self::Values(values) => values.iter().any(|value| value == expected),
         }
     }
@@ -1076,7 +1097,8 @@ impl ApiState {
                     "select u.id from oidc_links l join users u on u.id = l.user_id
                      where l.provider = ?1 and l.subject = ?2",
                 )?;
-                let mut rows = statement.query([provider_for_lookup.as_str(), subject_for_lookup.as_str()])?;
+                let mut rows =
+                    statement.query([provider_for_lookup.as_str(), subject_for_lookup.as_str()])?;
                 let Some(row) = rows.next()? else {
                     return Ok::<_, rusqlite::Error>(None);
                 };
@@ -1086,7 +1108,8 @@ impl ApiState {
             .await
             .map_err(|err| err.to_string())?
         {
-            self.upsert_oidc_link(user_id, provider, subject, email).await?;
+            self.upsert_oidc_link(user_id, provider, subject, email)
+                .await?;
             return self
                 .user_by_id(user_id)
                 .await?
@@ -1105,7 +1128,8 @@ impl ApiState {
                 bcrypt_cost,
             )
             .await?;
-        self.upsert_oidc_link(created, provider, subject, email).await?;
+        self.upsert_oidc_link(created, provider, subject, email)
+            .await?;
         self.user_by_id(created)
             .await?
             .ok_or_else(|| "newly created account disappeared".to_owned())
@@ -1249,68 +1273,71 @@ impl ApiState {
     ) -> Result<BookWriteOutcome, String> {
         let document = document.to_owned();
         self.db
-            .call(move |connection| -> Result<BookWriteOutcome, rusqlite::Error> {
-                let now = epoch_seconds() as i64;
-                let current: Option<(String, i64)> = connection
-                    .query_row(
-                        "select document, version from address_books where user_id = ?1",
-                        [user_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                    )
-                    .ok();
+            .call(
+                move |connection| -> Result<BookWriteOutcome, rusqlite::Error> {
+                    let now = epoch_seconds() as i64;
+                    let current: Option<(String, i64)> = connection
+                        .query_row(
+                            "select document, version from address_books where user_id = ?1",
+                            [user_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        )
+                        .ok();
 
-                if let Some(expected) = expected_version {
-                    // A caller that states a version has opted into the
-                    // precondition, which is how an operator script avoids
-                    // clobbering. The official client never does this.
-                    let current_version = current.as_ref().map(|(_, version)| *version).unwrap_or(0);
-                    if expected != current_version {
-                        return Ok(BookWriteOutcome::Stale {
-                            current: current_version,
+                    if let Some(expected) = expected_version {
+                        // A caller that states a version has opted into the
+                        // precondition, which is how an operator script avoids
+                        // clobbering. The official client never does this.
+                        let current_version =
+                            current.as_ref().map(|(_, version)| *version).unwrap_or(0);
+                        if expected != current_version {
+                            return Ok(BookWriteOutcome::Stale {
+                                current: current_version,
+                            });
+                        }
+                    }
+
+                    // Explicit `BookWriteOutcome` so the closure's error type is
+                    // inferable: `Ok` is constructed bare in one branch.
+                    let Some((previous, version)) = current else {
+                        connection.execute(
+                            "insert into address_books (user_id, document, updated_at, version)
+                         values (?1, ?2, ?3, 1)",
+                            rusqlite::params![user_id, document, now],
+                        )?;
+                        return Ok(BookWriteOutcome::Written {
+                            version: 1,
+                            superseded: false,
+                        });
+                    };
+
+                    if previous == document {
+                        // Idempotent re-push: nothing changed, so nothing happened.
+                        connection.execute(
+                            "update address_books set updated_at = ?2 where user_id = ?1",
+                            rusqlite::params![user_id, now],
+                        )?;
+                        return Ok(BookWriteOutcome::Written {
+                            version,
+                            superseded: false,
                         });
                     }
-                }
 
-                // Explicit `BookWriteOutcome` so the closure's error type is
-                // inferable: `Ok` is constructed bare in one branch.
-                let Some((previous, version)) = current else {
+                    let next = version.saturating_add(1);
                     connection.execute(
-                        "insert into address_books (user_id, document, updated_at, version)
-                         values (?1, ?2, ?3, 1)",
-                        rusqlite::params![user_id, document, now],
-                    )?;
-                    return Ok(BookWriteOutcome::Written {
-                        version: 1,
-                        superseded: false,
-                    });
-                };
-
-                if previous == document {
-                    // Idempotent re-push: nothing changed, so nothing happened.
-                    connection.execute(
-                        "update address_books set updated_at = ?2 where user_id = ?1",
-                        rusqlite::params![user_id, now],
-                    )?;
-                    return Ok(BookWriteOutcome::Written {
-                        version,
-                        superseded: false,
-                    });
-                }
-
-                let next = version.saturating_add(1);
-                connection.execute(
-                    "update address_books
+                        "update address_books
                      set document = ?2, updated_at = ?3, version = ?4,
                          previous_document = ?5, previous_version = ?6,
                          superseded_count = superseded_count + 1
                      where user_id = ?1",
-                    rusqlite::params![user_id, document, now, next, previous, version],
-                )?;
-                Ok(BookWriteOutcome::Written {
-                    version: next,
-                    superseded: true,
-                })
-            })
+                        rusqlite::params![user_id, document, now, next, previous, version],
+                    )?;
+                    Ok(BookWriteOutcome::Written {
+                        version: next,
+                        superseded: true,
+                    })
+                },
+            )
             .await
             .map_err(|err| err.to_string())
     }
@@ -1368,7 +1395,12 @@ impl ApiState {
     /// The single source of truth for "may this token still act": the session
     /// row must be live and the user must still be enabled at the same
     /// auth version that was minted into the token.
-    async fn session_verdict(&self, jti: &str, user_id: i64, auth_version: i64) -> Result<Verdict, String> {
+    async fn session_verdict(
+        &self,
+        jti: &str,
+        user_id: i64,
+        auth_version: i64,
+    ) -> Result<Verdict, String> {
         let jti = jti.to_owned();
         let row = self
             .db
@@ -1391,7 +1423,8 @@ impl ApiState {
             })
             .await
             .map_err(|err| err.to_string())?;
-        let Some((revoked_at, expires_at, session_auth_version, user_status, user_auth_version)) = row
+        let Some((revoked_at, expires_at, session_auth_version, user_status, user_auth_version)) =
+            row
         else {
             return Ok(Verdict::Inactive("revoked"));
         };
@@ -1451,7 +1484,11 @@ impl ApiState {
     async fn authenticate(&self, token: &str) -> Result<(Claims, User), AuthFailure> {
         let claims = self.verify_local(token)?;
         let verdict = self
-            .session_verdict(&claims.jti, claims.user_id as i64, claims.auth_version as i64)
+            .session_verdict(
+                &claims.jti,
+                claims.user_id as i64,
+                claims.auth_version as i64,
+            )
             .await
             .map_err(|_| AuthFailure::Unavailable)?;
         if let Verdict::Inactive(_) = verdict {
@@ -1792,7 +1829,10 @@ fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/api/ab/peers", post(crate::address_book::peers))
         .route("/api/ab/tags/:guid", post(crate::address_book::tags))
-        .route("/api/ab/peer/add/:guid", post(crate::address_book::peer_add))
+        .route(
+            "/api/ab/peer/add/:guid",
+            post(crate::address_book::peer_add),
+        )
         .route(
             "/api/ab/peer/update/:guid",
             axum::routing::put(crate::address_book::peer_update),
@@ -1831,19 +1871,24 @@ fn router(state: Arc<ApiState>) -> Router {
         // Heartbeat carries the client strategy; /api/sysinfo* is its companion.
         .route("/api/heartbeat", post(crate::client_strategy::heartbeat))
         .route("/api/sysinfo", post(crate::client_strategy::sysinfo))
-        .route("/api/sysinfo_ver", post(crate::client_strategy::sysinfo_version))
+        .route(
+            "/api/sysinfo_ver",
+            post(crate::client_strategy::sysinfo_version),
+        )
         .route("/api/devices/deploy", post(crate::enrolment::deploy))
         // Client audit and recording. Both answer 501 until enabled.
         .route("/api/audit/:typ", post(crate::client_audit::audit_upload))
-        .route("/api/audit", axum::routing::put(crate::client_audit::audit_note))
+        .route(
+            "/api/audit",
+            axum::routing::put(crate::client_audit::audit_note),
+        )
         .route("/api/record", post(crate::client_audit::record))
         // Operator surface. None of this is used by the official client; it
         // exists so an administrator (and these tests) never write the database
         // by hand and reimplement a secret's encoding.
         .route(
             "/api/admin/client-strategy",
-            get(crate::admin_api::get_client_strategy)
-                .put(crate::admin_api::set_client_strategy),
+            get(crate::admin_api::get_client_strategy).put(crate::admin_api::set_client_strategy),
         )
         .route("/api/admin/totp", post(crate::admin_api::enrol_totp))
         .route(
@@ -1942,10 +1987,7 @@ async fn login(
     //
     // Anything else is refused rather than silently treated as a password login.
     let is_second_step = request.login_type == "email_code";
-    if !request.login_type.is_empty()
-        && request.login_type != "account"
-        && !is_second_step
-    {
+    if !request.login_type.is_empty() && request.login_type != "account" && !is_second_step {
         return api_error(StatusCode::BAD_REQUEST, "UnsupportedLoginType");
     }
     let username = request.username.trim().to_owned();
@@ -1964,7 +2006,12 @@ async fn login(
     // response time does not reveal whether the account exists.
     let (Some(user), true) = (
         user.clone(),
-        verify_password(&request.password, user.as_ref().map_or(&state.dummy_hash, |u| &u.password_hash)).await,
+        verify_password(
+            &request.password,
+            user.as_ref()
+                .map_or(&state.dummy_hash, |u| &u.password_hash),
+        )
+        .await,
     ) else {
         state.record_login_failure(client_ip);
         return api_error(StatusCode::UNAUTHORIZED, "UsernameOrPasswordError");
@@ -1993,7 +2040,10 @@ async fn current_user(
     // The client sends {id, uuid} here; the payload is not needed, but leaving
     // it unread can wedge a keep-alive connection.
     let _ = read_json::<Value>(body).await;
-    match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+    match state
+        .authenticate(&bearer(&headers).unwrap_or_default())
+        .await
+    {
         Ok((_, user)) => Json(user_payload(&user)).into_response(),
         Err(AuthFailure::Unauthorized) => api_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
         Err(AuthFailure::Unavailable) => {
@@ -2028,7 +2078,10 @@ async fn connection_token(
     body: RawBody<Body>,
 ) -> Response {
     let _ = read_json::<Value>(body).await;
-    let token = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+    let token = match state
+        .authenticate(&bearer(&headers).unwrap_or_default())
+        .await
+    {
         Ok((_, user)) => user,
         Err(AuthFailure::Unauthorized) => {
             return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
@@ -2056,7 +2109,15 @@ async fn connection_token(
         }
     };
     if let Err(err) = state
-        .insert_session(jti, token.id, token.auth_version, epoch_seconds().saturating_add(ttl), String::new(), String::new(), String::new())
+        .insert_session(
+            jti,
+            token.id,
+            token.auth_version,
+            epoch_seconds().saturating_add(ttl),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
         .await
     {
         log::error!("cannot record connection session: {err}");
@@ -2239,10 +2300,7 @@ struct IntrospectRequest {
 /// reaches this endpoint behind mTLS, so it is opt-in infrastructure rather
 /// than part of the default path; without it, revocation takes effect through
 /// token expiry or key rotation.
-async fn introspect(
-    Extension(state): Extension<Arc<ApiState>>,
-    body: RawBody<Body>,
-) -> Response {
+async fn introspect(Extension(state): Extension<Arc<ApiState>>, body: RawBody<Body>) -> Response {
     let request = match read_json::<IntrospectRequest>(body).await {
         Ok(request) => request,
         Err(response) => return response,
@@ -2252,7 +2310,11 @@ async fn introspect(
         Err(_) => return Json(json!({"active": false, "reason": "revoked"})).into_response(),
     };
     let verdict = state
-        .session_verdict(&claims.jti, claims.user_id as i64, claims.auth_version as i64)
+        .session_verdict(
+            &claims.jti,
+            claims.user_id as i64,
+            claims.auth_version as i64,
+        )
         .await;
     match verdict {
         Ok(Verdict::Active) => Json(json!({"active": true, "sub": claims.sub})).into_response(),
@@ -2270,11 +2332,11 @@ async fn introspect(
 /// not interpret `{tags, peers, tag_colors}`, so a client update cannot require a
 /// server change. `null` is the client's own "no address book yet" answer, and it
 /// treats a 401 as "sign out", so an unknown account must not get one.
-async fn address_book(
-    Extension(state): Extension<Arc<ApiState>>,
-    headers: HeaderMap,
-) -> Response {
-    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+async fn address_book(Extension(state): Extension<Arc<ApiState>>, headers: HeaderMap) -> Response {
+    let user = match state
+        .authenticate(&bearer(&headers).unwrap_or_default())
+        .await
+    {
         Ok((_, user)) => user,
         Err(AuthFailure::Unauthorized) => {
             return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
@@ -2299,9 +2361,7 @@ async fn address_book(
             if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
                 headers.insert(axum::http::header::ETAG, value);
             }
-            if let Ok(value) =
-                axum::http::HeaderValue::from_str(&snapshot.version.to_string())
-            {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&snapshot.version.to_string()) {
                 headers.insert("x-ab-version", value);
             }
             response
@@ -2311,12 +2371,12 @@ async fn address_book(
             // A book that has never been written is version 0, so a script can
             // create one with If-Match: "0" and mean it.
             if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(0)) {
-                response.headers_mut().insert(axum::http::header::ETAG, value);
-            }
-            if let Ok(value) = axum::http::HeaderValue::from_str("0") {
                 response
                     .headers_mut()
-                    .insert("x-ab-version", value);
+                    .insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str("0") {
+                response.headers_mut().insert("x-ab-version", value);
             }
             response
         }
@@ -2360,10 +2420,7 @@ fn if_match_version(headers: &HeaderMap) -> Result<Precondition, ()> {
     }
     let inner = trimmed.trim_matches('"');
     match inner.strip_prefix("ab-") {
-        Some(number) => number
-            .parse::<i64>()
-            .map(Precondition::At)
-            .map_err(|_| ()),
+        Some(number) => number.parse::<i64>().map(Precondition::At).map_err(|_| ()),
         None => Err(()),
     }
 }
@@ -2385,7 +2442,10 @@ async fn address_book_push(
     headers: HeaderMap,
     body: RawBody<Body>,
 ) -> Response {
-    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+    let user = match state
+        .authenticate(&bearer(&headers).unwrap_or_default())
+        .await
+    {
         Ok((_, user)) => user,
         Err(AuthFailure::Unauthorized) => {
             return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
@@ -2413,7 +2473,10 @@ async fn address_book_push(
         Err(()) => return api_error(StatusCode::BAD_REQUEST, "InvalidIfMatch"),
     };
     match state.address_book_put(user.id, &push.data, expected).await {
-        Ok(BookWriteOutcome::Written { version, superseded }) => {
+        Ok(BookWriteOutcome::Written {
+            version,
+            superseded,
+        }) => {
             if superseded {
                 // Not an error — the client's model is last-write-wins — but it
                 // means someone lost an edit, so it must be visible.
@@ -2424,12 +2487,12 @@ async fn address_book_push(
             }
             let mut response = Json(Value::Null).into_response();
             if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(version)) {
-                response.headers_mut().insert(axum::http::header::ETAG, value);
-            }
-            if let Ok(value) = axum::http::HeaderValue::from_str(&version.to_string()) {
                 response
                     .headers_mut()
-                    .insert("x-ab-version", value);
+                    .insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str(&version.to_string()) {
+                response.headers_mut().insert("x-ab-version", value);
             }
             response
         }
@@ -2438,12 +2501,12 @@ async fn address_book_push(
             // `If-Match`, and a client that retries on 409 would loop.
             let mut response = api_error(StatusCode::PRECONDITION_FAILED, "AddressBookChanged");
             if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(current)) {
-                response.headers_mut().insert(axum::http::header::ETAG, value);
-            }
-            if let Ok(value) = axum::http::HeaderValue::from_str(&current.to_string()) {
                 response
                     .headers_mut()
-                    .insert("x-ab-version", value);
+                    .insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str(&current.to_string()) {
+                response.headers_mut().insert("x-ab-version", value);
             }
             response
         }
@@ -2463,7 +2526,10 @@ async fn address_book_previous(
     Extension(state): Extension<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Response {
-    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+    let user = match state
+        .authenticate(&bearer(&headers).unwrap_or_default())
+        .await
+    {
         Ok((_, user)) => user,
         Err(AuthFailure::Unauthorized) => {
             return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
@@ -2549,20 +2615,21 @@ async fn oidc_auth_start(
     // Discovery is a network call, so it runs off the async reactor.
     let runtime = state.oidc.clone_handle();
     let provider_for_task = provider.clone();
-    let document =
-        match hbb_common::tokio::task::spawn_blocking(move || runtime.discovery(&provider_for_task))
-            .await
-        {
-            Ok(Ok(document)) => document,
-            Ok(Err(err)) => {
-                log::error!("cannot load OIDC discovery: {err}");
-                return api_error(StatusCode::BAD_GATEWAY, "OidcDiscoveryFailed");
-            }
-            Err(err) => {
-                log::error!("OIDC discovery task failed: {err}");
-                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
-            }
-        };
+    let document = match hbb_common::tokio::task::spawn_blocking(move || {
+        runtime.discovery(&provider_for_task)
+    })
+    .await
+    {
+        Ok(Ok(document)) => document,
+        Ok(Err(err)) => {
+            log::error!("cannot load OIDC discovery: {err}");
+            return api_error(StatusCode::BAD_GATEWAY, "OidcDiscoveryFailed");
+        }
+        Err(err) => {
+            log::error!("OIDC discovery task failed: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
 
     let nonce = crate::oidc::random_token();
     let state_parameter = crate::oidc::random_token();
@@ -2963,7 +3030,9 @@ mod migration_tests {
         // Opening it runs the migrations.
         let connection = open_database(&path).expect("migration must succeed");
         let mut statement = connection
-            .prepare("select document, version, superseded_count from address_books where user_id = 1")
+            .prepare(
+                "select document, version, superseded_count from address_books where user_id = 1",
+            )
             .unwrap();
         let (document, version, superseded): (String, i64, i64) = statement
             .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -3075,7 +3144,10 @@ fn user_payload(user: &User) -> Value {
 }
 
 fn token_scope(base: &str, extra: &str) -> String {
-    let mut scope = base.split_ascii_whitespace().map(str::to_owned).collect::<Vec<_>>();
+    let mut scope = base
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     for value in extra.split_ascii_whitespace() {
         if !scope.iter().any(|existing| existing == value) {
             scope.push(value.to_owned());
@@ -3086,7 +3158,9 @@ fn token_scope(base: &str, extra: &str) -> String {
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer "))?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))?;
     (!token.trim().is_empty()).then(|| token.trim().to_owned())
 }
 
@@ -3195,7 +3269,8 @@ pub async fn run(config: ApiConfig) -> Result<(), String> {
         .await
         .map_err(|err| format!("cannot open {}: {err}", config.db_path.display()))?;
 
-    let dummy_hash = hash_password_async(uuid::Uuid::new_v4().to_string(), config.bcrypt_cost).await?;
+    let dummy_hash =
+        hash_password_async(uuid::Uuid::new_v4().to_string(), config.bcrypt_cost).await?;
     let oidc = Arc::new(crate::oidc::OidcRuntime::new(oidc_config));
     if oidc.enabled() {
         log::info!(
@@ -3249,7 +3324,9 @@ pub async fn run(config: ApiConfig) -> Result<(), String> {
         config.issuer,
         config.audience
     );
-    server.await.map_err(|err| format!("API server failed: {err}"))
+    server
+        .await
+        .map_err(|err| format!("API server failed: {err}"))
 }
 
 fn bootstrap_admin(
@@ -3268,7 +3345,15 @@ fn bootstrap_admin(
             log::info!("ADMIN_PASSWORD applied to the existing admin account");
         }
         None => {
-            create_user(connection, "admin", password, Some("admin"), true, None, cost)?;
+            create_user(
+                connection,
+                "admin",
+                password,
+                Some("admin"),
+                true,
+                None,
+                cost,
+            )?;
             log::info!("Created the bootstrap admin account");
         }
     }
@@ -3329,8 +3414,12 @@ mod tests {
             .verify_token(&token)
             .expect("hbbs must accept an API-minted token");
         assert_eq!(user_id, 7);
-        assert!(scope.split_ascii_whitespace().any(|value| value == "connect:initiate"));
-        assert!(scope.split_ascii_whitespace().any(|value| value == "connect:group:lab"));
+        assert!(scope
+            .split_ascii_whitespace()
+            .any(|value| value == "connect:initiate"));
+        assert!(scope
+            .split_ascii_whitespace()
+            .any(|value| value == "connect:group:lab"));
         assert_eq!(uuid::Uuid::parse_str(&jti).unwrap().to_string(), jti);
     }
 
@@ -3415,9 +3504,11 @@ mod tests {
             )
             .unwrap();
         let stored: String = connection
-            .query_row("select document from address_books where user_id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "select document from address_books where user_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(stored, document);
 
@@ -3432,9 +3523,11 @@ mod tests {
             )
             .unwrap();
         let stored: String = connection
-            .query_row("select document from address_books where user_id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "select document from address_books where user_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(stored, replacement);
         let count: i64 = connection
@@ -3451,7 +3544,10 @@ mod tests {
         let first = lookup_user_sync(&connection, "admin").unwrap().unwrap();
         bootstrap_admin(&connection, "first-password", 4).unwrap();
         let second = lookup_user_sync(&connection, "admin").unwrap().unwrap();
-        assert_eq!(first.auth_version, second.auth_version, "a no-op boot must not revoke sessions");
+        assert_eq!(
+            first.auth_version, second.auth_version,
+            "a no-op boot must not revoke sessions"
+        );
 
         bootstrap_admin(&connection, "second-password", 4).unwrap();
         let third = lookup_user_sync(&connection, "admin").unwrap().unwrap();

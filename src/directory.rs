@@ -29,8 +29,8 @@ use std::sync::Arc;
 use hbb_common::log;
 use tokio_rusqlite::rusqlite;
 
-use crate::auth_server::{ApiState, AuthFailure};
 use crate::address_book::Page;
+use crate::auth_server::{ApiState, AuthFailure};
 
 /// The `UserPayload` the client parses.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

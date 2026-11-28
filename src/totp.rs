@@ -60,7 +60,11 @@ pub fn decode_base32(secret: &str) -> Result<Vec<u8>, String> {
         let value = match ch {
             'A'..='Z' => ch as u32 - 'A' as u32,
             '2'..='7' => ch as u32 - '2' as u32 + 26,
-            _ => return Err(format!("secret contains an invalid Base32 character '{ch}'")),
+            _ => {
+                return Err(format!(
+                    "secret contains an invalid Base32 character '{ch}'"
+                ))
+            }
         };
         buffer = (buffer << 5) | value;
         bits += 5;
@@ -167,11 +171,13 @@ pub enum TotpVerdict {
 ///
 /// Pure so the window, the replay rule and the skew are testable without a
 /// database. `last_used_step` of 0 means "never used".
-pub fn check_code(secret: &[u8], submitted: &str, now_step: u64, last_used_step: u64) -> TotpVerdict {
-    let submitted: String = submitted
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect();
+pub fn check_code(
+    secret: &[u8],
+    submitted: &str,
+    now_step: u64,
+    last_used_step: u64,
+) -> TotpVerdict {
+    let submitted: String = submitted.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if submitted.len() != DIGITS as usize {
         return TotpVerdict::Wrong;
     }
@@ -356,7 +362,10 @@ mod tests {
             TotpVerdict::Accepted { step }
         );
         // The same code in the same window is a replay.
-        assert_eq!(check_code(RFC_SECRET, &code, step, step), TotpVerdict::Replayed);
+        assert_eq!(
+            check_code(RFC_SECRET, &code, step, step),
+            TotpVerdict::Replayed
+        );
         // And still a replay one step later, because the step was consumed.
         assert_eq!(
             check_code(RFC_SECRET, &code, step + 1, step),
@@ -388,11 +397,20 @@ mod tests {
     #[test]
     fn a_wrong_or_malformed_code_is_refused() {
         let step = 1_700_000_000 / STEP_SECONDS;
-        assert_eq!(check_code(RFC_SECRET, "000000", step, 0), TotpVerdict::Wrong);
+        assert_eq!(
+            check_code(RFC_SECRET, "000000", step, 0),
+            TotpVerdict::Wrong
+        );
         assert_eq!(check_code(RFC_SECRET, "", step, 0), TotpVerdict::Wrong);
-        assert_eq!(check_code(RFC_SECRET, "abcdef", step, 0), TotpVerdict::Wrong);
+        assert_eq!(
+            check_code(RFC_SECRET, "abcdef", step, 0),
+            TotpVerdict::Wrong
+        );
         // Longer than a code can be.
-        assert_eq!(check_code(RFC_SECRET, "1234567", step, 0), TotpVerdict::Wrong);
+        assert_eq!(
+            check_code(RFC_SECRET, "1234567", step, 0),
+            TotpVerdict::Wrong
+        );
     }
 
     #[test]

@@ -166,7 +166,9 @@ pub(crate) async fn enrol_totp(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let request = read_json::<TotpEnrolRequest>(body).await.unwrap_or_default();
+    let request = read_json::<TotpEnrolRequest>(body)
+        .await
+        .unwrap_or_default();
     let secret = if request.secret.trim().is_empty() {
         crate::totp::generate_secret()
     } else {
@@ -266,8 +268,7 @@ pub(crate) async fn disconnect(
     }
     // Delivered on the device's next heartbeat, which is the only channel the
     // client listens on for this.
-    Json(json!({"queued": request.ids.len()}))
-        .into_response()
+    Json(json!({"queued": request.ids.len()})).into_response()
 }
 
 #[cfg(test)]

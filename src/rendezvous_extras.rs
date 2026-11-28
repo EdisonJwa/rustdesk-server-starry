@@ -315,9 +315,15 @@ mod tests {
     fn only_the_api_namespace_is_reachable() {
         let list = allow(&["api.example.test"]);
         for path in [
-            "/admin", "/", "/api", "/apifoo",
+            "/admin",
+            "/",
+            "/api",
+            "/apifoo",
             // Prefix-matching alone would accept these.
-            "/api/../admin", "/api/./x", "/api//x", "/api/%2e%2e/x",
+            "/api/../admin",
+            "/api/./x",
+            "/api//x",
+            "/api/%2e%2e/x",
         ] {
             assert_eq!(
                 proxy_request_allowed(&list, "GET", "api.example.test", path),
@@ -410,9 +416,7 @@ mod tests {
                             // this file, which is CRLF and would otherwise let an
                             // editor turn the separator into a real newline.
                             let mut response = Vec::new();
-                            response.extend_from_slice(
-                                format!("HTTP/1.1 {status} OK").as_bytes(),
-                            );
+                            response.extend_from_slice(format!("HTTP/1.1 {status} OK").as_bytes());
                             response.extend_from_slice(&[0x0d, 0x0a]);
                             response.extend_from_slice(b"Content-Type: application/json");
                             response.extend_from_slice(&[0x0d, 0x0a]);
@@ -466,8 +470,11 @@ mod tests {
     fn an_allow_listed_request_is_proxied() {
         let server = OneShotServer::start(200, r#"{"ok":true}"#);
         let allow = vec![server.host()];
-        let reply =
-            execute_proxy_request_inner(&request("GET", "/api/login-options"), &server.base, &allow);
+        let reply = execute_proxy_request_inner(
+            &request("GET", "/api/login-options"),
+            &server.base,
+            &allow,
+        );
         assert!(reply.error.is_empty(), "unexpected error: {}", reply.error);
         assert_eq!(reply.status, 200);
         assert_eq!(String::from_utf8_lossy(&reply.body), r#"{"ok":true}"#);
@@ -504,8 +511,12 @@ mod tests {
         let server = OneShotServer::start(200, "{}");
         let allow = vec![server.host()];
         for method in ["DELETE", "PUT", "PATCH", "HEAD"] {
-            let reply = execute_proxy_request_inner(&request(method, "/api/x"), &server.base, &allow);
-            assert_eq!(reply.error, "method_not_allowed", "{method} must be refused");
+            let reply =
+                execute_proxy_request_inner(&request(method, "/api/x"), &server.base, &allow);
+            assert_eq!(
+                reply.error, "method_not_allowed",
+                "{method} must be refused"
+            );
         }
     }
 }

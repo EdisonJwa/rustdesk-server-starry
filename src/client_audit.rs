@@ -98,7 +98,12 @@ pub(crate) async fn audit_upload(
         Err(_) => return crate::auth_server::api_error(StatusCode::BAD_REQUEST, "ParamsError"),
     };
     let kind = kind.trim().to_owned();
-    if kind.is_empty() || kind.len() > 64 || !kind.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+    if kind.is_empty()
+        || kind.len() > 64
+        || !kind
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         return crate::auth_server::api_error(StatusCode::BAD_REQUEST, "ParamsError");
     }
     let stored = payload.to_string();

@@ -129,7 +129,9 @@ impl OidcConfig {
     pub fn from_json(raw: &str) -> Result<Self, String> {
         let document: OidcConfigDocument =
             serde_json::from_str(raw).map_err(|err| format!("invalid OIDC config: {err}"))?;
-        let ttl = document.request_ttl_seconds.unwrap_or(DEFAULT_REQUEST_TTL_SECONDS);
+        let ttl = document
+            .request_ttl_seconds
+            .unwrap_or(DEFAULT_REQUEST_TTL_SECONDS);
         if !(30..=900).contains(&ttl) {
             return Err("OIDC request_ttl_seconds must be between 30 and 900".to_owned());
         }
@@ -206,7 +208,10 @@ fn is_secure_url(value: &str) -> bool {
             None => return false,
         }
     } else {
-        authority.rsplit_once(':').map(|(host, _)| host).unwrap_or(authority)
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
     };
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
@@ -348,12 +353,9 @@ impl IdTokenClaims {
                 }
             }
         }
-        for candidate in [
-            self.preferred_username.as_deref(),
-            self.email.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        for candidate in [self.preferred_username.as_deref(), self.email.as_deref()]
+            .into_iter()
+            .flatten()
         {
             if !candidate.trim().is_empty() {
                 return candidate.trim().to_owned();
@@ -529,7 +531,13 @@ fn select_key(
     jwks.keys
         .iter()
         .filter(|key| key.key_use.as_deref() != Some("enc"))
-        .filter(|key| if wants_ec { key.kty == "EC" } else { key.kty == "RSA" })
+        .filter(|key| {
+            if wants_ec {
+                key.kty == "EC"
+            } else {
+                key.kty == "RSA"
+            }
+        })
         .filter(|key| match kid {
             Some(kid) => key.kid.as_deref() == Some(kid),
             // Without a `kid`, only a single unambiguous key may be used.
@@ -716,9 +724,7 @@ impl PendingLogins {
         let entries = self.entries.lock().map_err(|_| PendingError::Unknown)?;
         entries
             .iter()
-            .find(|(_, entry)| {
-                entry.state_parameter == state && entry.created.elapsed() < ttl
-            })
+            .find(|(_, entry)| entry.state_parameter == state && entry.created.elapsed() < ttl)
             .map(|(code, _)| code.clone())
             .ok_or(PendingError::Unknown)
     }
@@ -729,9 +735,7 @@ impl PendingLogins {
         let entries = self.entries.lock().map_err(|_| PendingError::Unknown)?;
         entries
             .values()
-            .find(|entry| {
-                entry.state_parameter == state && entry.created.elapsed() < ttl
-            })
+            .find(|entry| entry.state_parameter == state && entry.created.elapsed() < ttl)
             .map(|entry| entry.provider.clone())
             .ok_or(PendingError::Unknown)
     }
@@ -977,7 +981,9 @@ mod tests {
         let mut unsafe_name = provider();
         unsafe_name.name = "../etc/passwd".to_owned();
         let raw = serde_json::json!({"providers": [unsafe_name]}).to_string();
-        assert!(OidcConfig::from_json(&raw).unwrap_err().contains("letters, digits"));
+        assert!(OidcConfig::from_json(&raw)
+            .unwrap_err()
+            .contains("letters, digits"));
     }
 
     /// An unset or empty config must mean "OIDC off", never "OIDC open".
@@ -1222,19 +1228,20 @@ mod tests {
 
         pending.complete(&code, "state-1", login, ttl).unwrap();
         assert_eq!(
-            pending.complete(
-                &code,
-                "state-1",
-                CompletedLogin {
-                    username: "again".to_owned(),
-                    subject: "subject-1".to_owned(),
-                    email: None,
-                    display_name: String::new(),
-                    avatar: String::new(),
-                },
-                ttl,
-            )
-            .unwrap_err(),
+            pending
+                .complete(
+                    &code,
+                    "state-1",
+                    CompletedLogin {
+                        username: "again".to_owned(),
+                        subject: "subject-1".to_owned(),
+                        email: None,
+                        display_name: String::new(),
+                        avatar: String::new(),
+                    },
+                    ttl,
+                )
+                .unwrap_err(),
             PendingError::AlreadyCompleted,
             "a second callback must not overwrite a completed login"
         );
@@ -1303,9 +1310,7 @@ mod tests {
         // Zero ttl makes every entry immediately stale, which is how the
         // expiry branch is exercised without sleeping.
         assert_eq!(
-            pending
-                .peek(&code, Duration::from_secs(0))
-                .unwrap_err(),
+            pending.peek(&code, Duration::from_secs(0)).unwrap_err(),
             PendingError::Expired
         );
     }
@@ -1368,8 +1373,8 @@ mod tests {
             token_endpoint: "https://idp.example.test/token".to_owned(),
             jwks_uri: "https://idp.example.test/jwks".to_owned(),
         };
-        let url = authorization_url(&document, &provider(), "state-1", "nonce-1", "challenge")
-            .unwrap();
+        let url =
+            authorization_url(&document, &provider(), "state-1", "nonce-1", "challenge").unwrap();
         for expected in [
             "response_type=code",
             "client_id=starry-client",
@@ -1392,8 +1397,14 @@ mod tests {
             let payload = json!({"iss": "https://idp.example.test"});
             let token = format!(
                 "{}.{}.{}",
-                encode_config(serde_json::to_vec(&header).unwrap(), base64::URL_SAFE_NO_PAD),
-                encode_config(serde_json::to_vec(&payload).unwrap(), base64::URL_SAFE_NO_PAD),
+                encode_config(
+                    serde_json::to_vec(&header).unwrap(),
+                    base64::URL_SAFE_NO_PAD
+                ),
+                encode_config(
+                    serde_json::to_vec(&payload).unwrap(),
+                    base64::URL_SAFE_NO_PAD
+                ),
                 encode_config(b"signature", base64::URL_SAFE_NO_PAD)
             );
             let jwks = Jwks {

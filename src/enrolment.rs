@@ -267,7 +267,10 @@ mod tests {
     fn token_fingerprint_is_stable_and_distinguishing() {
         let token = generate_token();
         assert_eq!(token_fingerprint(&token), token_fingerprint(&token));
-        assert_ne!(token_fingerprint(&token), token_fingerprint(&generate_token()));
+        assert_ne!(
+            token_fingerprint(&token),
+            token_fingerprint(&generate_token())
+        );
         // 32 bytes base64url is 43 characters; guard against a short token.
         assert!(token.len() >= 40, "token too short: {}", token.len());
     }

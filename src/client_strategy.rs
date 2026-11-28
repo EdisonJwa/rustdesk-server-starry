@@ -393,7 +393,10 @@ mod tests {
         ];
         assert_eq!(ALLOWED_KEYS.len(), documented.len());
         for key in documented {
-            assert!(ALLOWED_KEYS.contains(&key), "{key} missing from the allow-list");
+            assert!(
+                ALLOWED_KEYS.contains(&key),
+                "{key} missing from the allow-list"
+            );
         }
     }
 
@@ -408,7 +411,11 @@ mod tests {
             "custom-rendezvous-server": "attacker.example"
         });
         let filtered = filter_config_options(options.as_object().unwrap().clone());
-        assert_eq!(filtered.len(), 2, "only the two listed keys survive: {filtered:?}");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "only the two listed keys survive: {filtered:?}"
+        );
         assert!(filtered.contains_key("relay-server"));
         assert!(filtered.contains_key("enable-audio"));
         assert!(!filtered.contains_key("password"));

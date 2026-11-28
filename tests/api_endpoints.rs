@@ -219,12 +219,17 @@ fn http_delete_bearer(url: &str, body: &Value, token: &str) -> (u16, String) {
 fn login(api: &Api) -> String {
     let (status, body) = http_post_bearer(
         &format!("{}/api/login", api.base),
-        Some(&json!({"username": "admin", "password": ADMIN_PASSWORD, "id": "dev-1", "uuid": "u-1"})),
+        Some(
+            &json!({"username": "admin", "password": ADMIN_PASSWORD, "id": "dev-1", "uuid": "u-1"}),
+        ),
         None,
     );
     assert_eq!(status, 200, "login failed: {body}");
     let parsed: Value = serde_json::from_str(&body).unwrap();
-    parsed["access_token"].as_str().expect("an access token").to_owned()
+    parsed["access_token"]
+        .as_str()
+        .expect("an access token")
+        .to_owned()
 }
 
 /// `/api/ab/personal` is what switches the client from legacy to structured
@@ -236,8 +241,12 @@ fn structured_address_book_endpoints_exist() {
     let token = login(&api);
 
     // An empty body: the client posts `Content-Length: 0` here.
-    let (status, body) = http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&token));
-    assert_eq!(status, 200, "personal must exist or the client stays legacy: {body}");
+    let (status, body) =
+        http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&token));
+    assert_eq!(
+        status, 200,
+        "personal must exist or the client stays legacy: {body}"
+    );
     let parsed: Value = serde_json::from_str(&body).unwrap();
     let guid = parsed["guid"].as_str().expect("a guid").to_owned();
 
@@ -246,7 +255,8 @@ fn structured_address_book_endpoints_exist() {
     let again: Value = serde_json::from_str(&again).unwrap();
     assert_eq!(again["guid"], guid, "the personal book must be stable");
 
-    let (status, body) = http_post_bearer(&format!("{}/api/ab/settings", api.base), None, Some(&token));
+    let (status, body) =
+        http_post_bearer(&format!("{}/api/ab/settings", api.base), None, Some(&token));
     assert_eq!(status, 200);
     let settings: Value = serde_json::from_str(&body).unwrap();
     assert!(
@@ -268,8 +278,11 @@ fn structured_address_book_endpoints_exist() {
     }
 
     // Tags answer a bare array, not an envelope.
-    let (status, body) =
-        http_post_bearer(&format!("{}/api/ab/tags/{guid}", api.base), None, Some(&token));
+    let (status, body) = http_post_bearer(
+        &format!("{}/api/ab/tags/{guid}", api.base),
+        None,
+        Some(&token),
+    );
     assert_eq!(status, 200, "{body}");
     let tags: Value = serde_json::from_str(&body).unwrap();
     assert!(tags.is_array(), "tags must be a bare array: {body}");
@@ -332,7 +345,10 @@ fn address_book_peer_round_trip() {
         ("device_group_name", json!("servers")),
         ("same_server", json!(true)),
     ] {
-        assert_eq!(stored[key], expected, "field {key} did not round-trip: {stored}");
+        assert_eq!(
+            stored[key], expected,
+            "field {key} did not round-trip: {stored}"
+        );
     }
     assert_eq!(stored["tags"], json!(["office"]));
 
@@ -401,7 +417,11 @@ fn renaming_a_tag_rewrites_peer_tags() {
     );
     assert_eq!(status, 200, "{body}");
 
-    let (_, body) = http_post_bearer(&format!("{}/api/ab/tags/{guid}", api.base), None, Some(&token));
+    let (_, body) = http_post_bearer(
+        &format!("{}/api/ab/tags/{guid}", api.base),
+        None,
+        Some(&token),
+    );
     let tags: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(tags[0]["name"], "work");
     assert_eq!(tags[0]["color"].as_u64(), Some(4_278_255_360));
@@ -444,7 +464,10 @@ fn users_requires_admin_with_the_expected_error() {
     let api = start_api_with("users", &[]);
     let token = login(&api);
     // The bootstrap account is an administrator, so this succeeds.
-    let (status, body) = http_get_bearer(&format!("{}/api/users?current=1&pageSize=100&status=1", api.base), &token);
+    let (status, body) = http_get_bearer(
+        &format!("{}/api/users?current=1&pageSize=100&status=1", api.base),
+        &token,
+    );
     assert_eq!(status, 200, "{body}");
     let parsed: Value = serde_json::from_str(&body).unwrap();
     assert!(parsed["total"].as_u64().unwrap() >= 1);
@@ -552,8 +575,11 @@ fn client_audit_and_recording_are_off_by_default() {
     let _guard = gate();
     let api = start_api_with("audit-off", &[]);
     let token = login(&api);
-    let (status, _) =
-        http_post_bearer(&format!("{}/api/audit/login", api.base), Some(&json!({})), Some(&token));
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/audit/login", api.base),
+        Some(&json!({})),
+        Some(&token),
+    );
     assert_eq!(status, 501, "client audit must be opt-in");
     let (status, _) = http_post_bearer(
         &format!("{}/api/record?type=new&file=a.mp4", api.base),
@@ -678,10 +704,19 @@ fn totp_login_requires_a_second_step() {
     );
     assert_eq!(status, 200, "{body}");
     let parsed: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(parsed["type"], "email_code", "the client keys off this: {parsed}");
+    assert_eq!(
+        parsed["type"], "email_code",
+        "the client keys off this: {parsed}"
+    );
     assert_eq!(parsed["tfa_type"], "tfa_check");
-    assert_eq!(parsed["access_token"], "", "step one must not hand out a token");
-    let handle = parsed["secret"].as_str().expect("a secret handle").to_owned();
+    assert_eq!(
+        parsed["access_token"], "",
+        "step one must not hand out a token"
+    );
+    let handle = parsed["secret"]
+        .as_str()
+        .expect("a secret handle")
+        .to_owned();
 
     // A wrong code is refused.
     let (status, _) = http_post_bearer(
@@ -919,10 +954,7 @@ fn another_account_cannot_see_an_unshared_book() {
         .unwrap()
         .iter()
         .any(|profile| profile["guid"] == guid.as_str());
-    assert!(
-        !leaked,
-        "another account's book was listed: {profiles}"
-    );
+    assert!(!leaked, "another account's book was listed: {profiles}");
 
     // 2. Peers must be a 404, not an empty list: an empty list would leak that
     // the book exists.
@@ -931,7 +963,10 @@ fn another_account_cannot_see_an_unshared_book() {
         None,
         Some(&intruder),
     );
-    assert_eq!(status, 404, "reading another account's peers must be refused");
+    assert_eq!(
+        status, 404,
+        "reading another account's peers must be refused"
+    );
 
     // 3. Tags likewise.
     let (status, _) = http_post_bearer(
@@ -956,7 +991,10 @@ fn another_account_cannot_see_an_unshared_book() {
         Some(&owner),
     );
     let listed: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(listed["total"], 1, "the owner must still see their own book");
+    assert_eq!(
+        listed["total"], 1,
+        "the owner must still see their own book"
+    );
 }
 
 /// Sharing is explicit, capped by the book's ceiling, and revocable.
@@ -1045,7 +1083,10 @@ fn legacy_address_book_reports_a_version() {
     // Nothing written yet: the answer is a literal null, as it has always been,
     // so the client keeps treating the account as having no book.
     let (status, body) = http_get_bearer(&format!("{}/api/ab", api.base), &token);
-    assert_eq!(status, 200, "a read with no book must be a normal empty answer");
+    assert_eq!(
+        status, 200,
+        "a read with no book must be a normal empty answer"
+    );
     assert_eq!(body.trim().to_lowercase(), "null");
 
     let book = json!({"tags": ["office"], "peers": [], "tag_colors": "{}"}).to_string();
@@ -1109,7 +1150,10 @@ fn a_stale_precondition_is_refused_with_412() {
         &token,
         &[("If-Match", "\"ab-1\"")],
     );
-    assert_eq!(stale.0, 412, "a stale precondition must be refused: {stale:?}");
+    assert_eq!(
+        stale.0, 412,
+        "a stale precondition must be refused: {stale:?}"
+    );
     let stale_body: Value = serde_json::from_str(&stale.1).unwrap();
     assert_eq!(stale_body["error"], "AddressBookChanged");
 
@@ -1219,7 +1263,8 @@ fn a_legacy_book_survives_the_switch_to_structured_mode() {
     assert_eq!(status, 200);
 
     // Now the structured endpoints exist, so the client will use them.
-    let (status, body) = http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&token));
+    let (status, body) =
+        http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&token));
     assert_eq!(status, 200, "{body}");
     let guid = serde_json::from_str::<Value>(&body).unwrap()["guid"]
         .as_str()
@@ -1242,7 +1287,11 @@ fn a_legacy_book_survives_the_switch_to_structured_mode() {
     assert_eq!(listed["data"][0]["alias"], "prod-db");
     assert_eq!(listed["data"][0]["hash"], "h");
 
-    let (_, body) = http_post_bearer(&format!("{}/api/ab/tags/{guid}", api.base), None, Some(&token));
+    let (_, body) = http_post_bearer(
+        &format!("{}/api/ab/tags/{guid}", api.base),
+        None,
+        Some(&token),
+    );
     let tags: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(tags[0]["name"], "office");
     // The colour came from the legacy `tag_colors` string, which is nested JSON

@@ -264,10 +264,7 @@ fn import_legacy_book(
         if let Ok(colours) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(map) = colours.as_object() {
                 for (name, colour) in map {
-                    let colour = colour
-                        .as_str()
-                        .and_then(parse_hex_colour)
-                        .unwrap_or(0);
+                    let colour = colour.as_str().and_then(parse_hex_colour).unwrap_or(0);
                     connection.execute(
                         "insert into ab_tags (guid, name, color) values (?1, ?2, ?3)
                          on conflict(guid, name) do update set color = excluded.color",
@@ -331,7 +328,11 @@ fn import_legacy_book(
                     field("platform"),
                     field("alias"),
                     tags_json,
-                    if field("forceAlwaysRelay").eq_ignore_ascii_case("true") { 1 } else { 0 },
+                    if field("forceAlwaysRelay").eq_ignore_ascii_case("true") {
+                        1
+                    } else {
+                        0
+                    },
                     field("rdpPort"),
                     field("rdpUsername"),
                     field("loginName"),
@@ -473,15 +474,19 @@ async fn may_read(state: &ApiState, user_id: i64, guid: &str) -> Result<bool, St
         .await
 }
 
-pub(crate) async fn tags_in_book(state: &ApiState, user_id: i64, guid: &str) -> Result<Vec<BookTag>, String> {
+pub(crate) async fn tags_in_book(
+    state: &ApiState,
+    user_id: i64,
+    guid: &str,
+) -> Result<Vec<BookTag>, String> {
     if !may_read(state, user_id, guid).await? {
         return Err("book_not_found".to_owned());
     }
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
-            let mut statement =
-                connection.prepare("select name, color from ab_tags where guid = ?1 order by name")?;
+            let mut statement = connection
+                .prepare("select name, color from ab_tags where guid = ?1 order by name")?;
             let mut rows = statement.query([guid])?;
             let mut tags = Vec::new();
             while let Some(row) = rows.next()? {
@@ -532,7 +537,11 @@ pub(crate) async fn upsert_peer(
                     peer.platform,
                     peer.alias,
                     tags,
-                    if peer.force_always_relay.eq_ignore_ascii_case("true") { 1 } else { 0 },
+                    if peer.force_always_relay.eq_ignore_ascii_case("true") {
+                        1
+                    } else {
+                        0
+                    },
                     peer.rdp_port,
                     peer.rdp_username,
                     peer.login_name,
@@ -548,7 +557,11 @@ pub(crate) async fn upsert_peer(
 }
 
 /// Deletes the named peers from a book and reports how many existed.
-pub(crate) async fn delete_peers(state: &ApiState, guid: &str, ids: Vec<String>) -> Result<u64, String> {
+pub(crate) async fn delete_peers(
+    state: &ApiState,
+    guid: &str,
+    ids: Vec<String>,
+) -> Result<u64, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -582,7 +595,12 @@ pub(crate) async fn upsert_tag(state: &ApiState, guid: &str, tag: BookTag) -> Re
 ///
 /// The client sends the old and new name and expects the peers to follow, so
 /// doing this in one statement set here is what keeps the book consistent.
-pub(crate) async fn rename_tag(state: &ApiState, guid: &str, old: &str, new: &str) -> Result<(), String> {
+pub(crate) async fn rename_tag(
+    state: &ApiState,
+    guid: &str,
+    old: &str,
+    new: &str,
+) -> Result<(), String> {
     let guid = guid.to_owned();
     let old = old.to_owned();
     let new = new.to_owned();
@@ -624,7 +642,11 @@ pub(crate) async fn rename_tag(state: &ApiState, guid: &str, old: &str, new: &st
         .await
 }
 
-pub(crate) async fn delete_tags(state: &ApiState, guid: &str, names: Vec<String>) -> Result<u64, String> {
+pub(crate) async fn delete_tags(
+    state: &ApiState,
+    guid: &str,
+    names: Vec<String>,
+) -> Result<u64, String> {
     let guid = guid.to_owned();
     state
         .db_call(move |connection| {
@@ -778,7 +800,9 @@ async fn optional_json<T: serde::de::DeserializeOwned>(body: RawBody<Body>) -> O
 
 fn unauthorized(auth: AuthFailure) -> Response {
     match auth {
-        AuthFailure::Unauthorized => crate::auth_server::api_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
+        AuthFailure::Unauthorized => {
+            crate::auth_server::api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
+        }
         AuthFailure::Unavailable => {
             crate::auth_server::api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
         }

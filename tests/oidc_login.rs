@@ -48,7 +48,9 @@ static GATE_LOCK: Mutex<()> = Mutex::new(());
 /// turns one real failure into a cascade of `PoisonError`s and buries the
 /// original cause.
 fn gate() -> std::sync::MutexGuard<'static, ()> {
-    GATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    GATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn reserve_port() -> u16 {
@@ -162,7 +164,8 @@ fn start_provider() -> (ProviderGuard, Arc<ProviderState>, u16) {
     });
     let serving = state.clone();
     std::thread::spawn(move || {
-        let listener = TcpListener::bind(("127.0.0.1", port)).expect("cannot bind the fake provider");
+        let listener =
+            TcpListener::bind(("127.0.0.1", port)).expect("cannot bind the fake provider");
         // Non-blocking accept with a short sleep, so the loop can notice `stop`
         // without needing a self-connect to wake it. The listener is dropped
         // when this closure returns, which releases the port.
@@ -217,7 +220,10 @@ fn handle_provider_connection(mut stream: TcpStream, state: &ProviderState) -> s
     }
     let body = String::from_utf8_lossy(&body).into_owned();
     let path = target.split('?').next().unwrap_or("/");
-    let query = target.split_once('?').map(|(_, q)| q.to_owned()).unwrap_or_default();
+    let query = target
+        .split_once('?')
+        .map(|(_, q)| q.to_owned())
+        .unwrap_or_default();
 
     let (status, content_type, payload) = match (method.as_str(), path) {
         ("GET", "/.well-known/openid-configuration") => (
@@ -263,7 +269,11 @@ fn handle_provider_connection(mut stream: TcpStream, state: &ProviderState) -> s
         ("POST", "/token") => {
             state.token_calls.fetch_add(1, Ordering::SeqCst);
             if state.fail_token.load(Ordering::SeqCst) {
-                ("400 Bad Request", "application/json", json!({"error": "invalid_grant"}).to_string())
+                (
+                    "400 Bad Request",
+                    "application/json",
+                    json!({"error": "invalid_grant"}).to_string(),
+                )
             } else {
                 let sub = form_field(&body, "sub").unwrap_or_else(|| "subject-1".to_owned());
                 let nonce = state.expected_nonce.lock().unwrap().clone();
@@ -472,7 +482,10 @@ fn oidc_is_off_without_a_config_file() {
         &format!("{base}/api/oidc/auth"),
         &json!({"op": PROVIDER_NAME, "id": "1", "uuid": "u", "deviceInfo": {}, "apiDomain": ""}),
     );
-    assert_eq!(status, 501, "an unconfigured OIDC start must not look usable");
+    assert_eq!(
+        status, 501,
+        "an unconfigured OIDC start must not look usable"
+    );
 }
 
 /// The full client sequence against a real provider.
@@ -523,7 +536,10 @@ fn oidc_login_round_trip_mints_a_usable_access_token() {
     let started: Value = serde_json::from_str(&body).unwrap();
     let code = started["code"].as_str().unwrap().to_owned();
     let auth_url = started["url"].as_str().unwrap().to_owned();
-    assert!(auth_url.contains("code_challenge_method=S256"), "{auth_url}");
+    assert!(
+        auth_url.contains("code_challenge_method=S256"),
+        "{auth_url}"
+    );
     assert!(auth_url.contains("response_type=code"), "{auth_url}");
 
     // 3. Polling before the browser finishes must keep the client waiting.
@@ -560,7 +576,10 @@ fn oidc_login_round_trip_mints_a_usable_access_token() {
 
     // 5. Simulate the IdP redirecting the browser back.
     let state_param = extract_query(&auth_url, "state").expect("state in the authorization URL");
-    let callback = format!("{}/oidc/callback?code=auth-code-1&state={state_param}", api.base);
+    let callback = format!(
+        "{}/oidc/callback?code=auth-code-1&state={state_param}",
+        api.base
+    );
     let (status, _) = http_get(&callback).unwrap();
     assert_eq!(status, 200, "the callback must complete the browser half");
     assert_eq!(
