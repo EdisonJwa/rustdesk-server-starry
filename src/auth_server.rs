@@ -611,6 +611,54 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
 const USER_COLUMNS: &str =
     "id, name, password_hash, display_name, avatar, email, note, status, is_admin, auth_version, extra_scopes";
 
+/// Columns added after the first release, applied explicitly.
+///
+/// `create table if not exists` is a no-op on a table that already exists, so
+/// adding a column to the `SCHEMA` literal does not reach an existing database.
+/// Every later change therefore needs its own statement here, and each one must
+/// be safe to run on every boot.
+///
+/// A failure is fatal: the server must not run against a schema it does not
+/// understand, because the alternative is a read path that half-works.
+fn apply_migrations(connection: &rusqlite::Connection) -> Result<(), String> {
+    // (table, column, definition) — one row per column ever added.
+    const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+        ("address_books", "version", "integer not null default 1"),
+        ("address_books", "previous_document", "text"),
+        ("address_books", "previous_version", "integer"),
+        (
+            "address_books",
+            "superseded_count",
+            "integer not null default 0",
+        ),
+    ];
+    for (table, column, definition) in ADDED_COLUMNS {
+        // `pragma_table_info` is a table-valued function that older SQLite builds
+        // do not expose, and a missing function would make the check return
+        // "absent" or error depending on the build. Parsing the CREATE statement
+        // is version-independent.
+        let columns: String = connection
+            .query_row(
+                "select sql from sqlite_master where type = 'table' and name = ?1",
+                [*table],
+                |row| row.get(0),
+            )
+            .map_err(|err| format!("cannot inspect the shape of {table}: {err}"))?;
+        let exists = columns.contains(&format!(" {column} ")) || columns.contains(&format!("({column} "));
+        if exists {
+            continue;
+        }
+        connection
+            .execute(
+                &format!("alter table {table} add column {column} {definition}"),
+                [],
+            )
+            .map_err(|err| format!("cannot add {table}.{column}: {err}"))?;
+        hbb_common::log::info!("schema migration: added {table}.{column}");
+    }
+    Ok(())
+}
+
 /// Opens the database and applies the schema. Synchronous on purpose: the CLI
 /// subcommands use it directly, and `run` hands the same file to the async
 /// connection afterwards.
@@ -624,6 +672,7 @@ pub fn open_database(path: &Path) -> Result<rusqlite::Connection, String> {
     connection
         .execute_batch(SCHEMA)
         .map_err(|err| format!("cannot initialize {}: {err}", path.display()))?;
+    apply_migrations(&connection)?;
     Ok(connection)
 }
 
@@ -2856,6 +2905,89 @@ fn oidc_callback_page(status: StatusCode, message: &str) -> Response {
 
 async fn unknown_endpoint() -> Response {
     api_error(StatusCode::NOT_FOUND, "NotFound")
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// A database created by the previous release must gain the new columns.
+    ///
+    /// This is the test whose absence shipped a 500: `create table if not
+    /// exists` is a no-op on an existing table, so adding a column to the
+    /// schema literal did nothing to production. The fixture here is the old
+    /// schema verbatim, which is the only way to reproduce it.
+    #[test]
+    fn an_old_database_gains_the_version_columns() {
+        let directory = std::env::temp_dir().join(format!(
+            "starry-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("users.db");
+
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            // The shape the previous release created.
+            connection
+                .execute_batch(
+                    "create table address_books (
+                         user_id integer primary key,
+                         document text not null,
+                         updated_at integer not null
+                     );",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "insert into address_books (user_id, document, updated_at) values (1, ?1, 0)",
+                    ["{\"tags\":[\"old\"],\"peers\":[],\"tag_colors\":\"{}\"}"],
+                )
+                .unwrap();
+        }
+
+        // Opening it runs the migrations.
+        let connection = open_database(&path).expect("migration must succeed");
+        let mut statement = connection
+            .prepare("select document, version, superseded_count from address_books where user_id = 1")
+            .unwrap();
+        let (document, version, superseded): (String, i64, i64) = statement
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        assert_eq!(
+            document, "{\"tags\":[\"old\"],\"peers\":[],\"tag_colors\":\"{}\"}",
+            "the existing document must survive the migration"
+        );
+        assert_eq!(version, 1, "an existing book starts at version 1");
+        assert_eq!(superseded, 0);
+
+        // And it is idempotent: a second open must not fail on duplicate columns.
+        drop(statement);
+        drop(connection);
+        open_database(&path).expect("re-running the migration must be safe");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every migration target must be declared in both places, or the schema
+    /// literal and the ALTER list will drift.
+    #[test]
+    fn the_schema_and_the_migration_list_agree() {
+        for (table, column, _) in [
+            ("address_books", "version", ""),
+            ("address_books", "previous_document", ""),
+            ("address_books", "previous_version", ""),
+            ("address_books", "superseded_count", ""),
+        ] {
+            assert!(
+                SCHEMA.contains(column),
+                "{table}.{column} must also be in the SCHEMA literal, so a fresh database and a migrated one match"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
