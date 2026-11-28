@@ -433,6 +433,11 @@ pub(crate) fn simulate(
             relay_id: selection.relay,
         });
     let exclusion_reasons = snapshot.exclusion_reasons(requirement);
+    // The live selector decides, so this trace cannot describe a different
+    // choice than the data plane makes.
+    let selected_relay = snapshot
+        .select_geo(client_a, client_b, &eligible, requirement)
+        .map(|selection| crate::rendezvous_server::pick_within(selection.candidates, client_a));
     Ok(allocation_explain::explain_relay_selection(
         &configured,
         &eligible,
@@ -441,6 +446,7 @@ pub(crate) fn simulate(
         snapshot.config_generation,
         snapshot.health_snapshot_id,
         &exclusion_reasons,
+        selected_relay,
     ))
 }
 

@@ -47,6 +47,13 @@ pub(crate) fn explain_relay_selection(
     config_generation: u64,
     health_snapshot_id: String,
     exclusion_reasons: &HashMap<String, String>,
+    // The relay the live path would pick for this client, when a rule matched.
+    //
+    // Passed in rather than recomputed: the live path spreads a rule's clients
+    // across its candidates by client address, and a second implementation here
+    // would be free to disagree with it — which is exactly the failure mode this
+    // trace exists to catch.
+    selected_relay: Option<String>,
 ) -> AllocationTrace {
     let eligible: HashSet<String> = eligible_relays
         .iter()
@@ -77,10 +84,14 @@ pub(crate) fn explain_relay_selection(
         .collect();
 
     let (kind, relay_id, predicted_index) = if let Some(rule) = matched_rule.as_ref() {
-        if eligible.contains(&rule.relay_id.to_ascii_lowercase()) {
-            ("geo_rule".to_owned(), Some(rule.relay_id.clone()), None)
-        } else {
-            ("no_eligible_relay".to_owned(), None, None)
+        match selected_relay {
+            Some(selected) if eligible.contains(&selected.to_ascii_lowercase()) => {
+                // Report the live choice, not the rule's first entry: with the
+                // spreading in place those differ, and a trace that reports the
+                // first entry would describe a decision nothing makes.
+                ("geo_rule".to_owned(), Some(selected), None)
+            }
+            _ => ("no_eligible_relay".to_owned(), None, None),
         }
     } else if eligible_relays.is_empty() {
         ("no_eligible_relay".to_owned(), None, None)
@@ -134,6 +145,7 @@ mod tests {
             42,
             "health-9".to_owned(),
             &reasons,
+            None,
         );
         let second = explain_relay_selection(
             &configured,
@@ -143,6 +155,7 @@ mod tests {
             42,
             "health-9".to_owned(),
             &reasons,
+            None,
         );
         assert_eq!(first, second);
         assert_eq!(first.selection.kind, "rotation_prediction");
@@ -163,6 +176,7 @@ mod tests {
             3,
             "health-4".to_owned(),
             &reasons,
+            None,
         );
         assert!(!trace.candidates[0].eligible);
         assert_eq!(

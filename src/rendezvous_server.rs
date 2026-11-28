@@ -86,7 +86,7 @@ const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 /// `STARRY_RELAY_PIN_TO_FIRST=1` restores the previous first-only behaviour,
 /// which is the sane thing to reach for if a deployment's exit addresses are
 /// concentrated behind one NAT and the hash pins a whole site onto one relay.
-fn pick_within(candidates: Vec<String>, client: IpAddr) -> String {
+pub(crate) fn pick_within(candidates: Vec<String>, client: IpAddr) -> String {
     pick_within_pinned(candidates, client, pin_to_first())
 }
 
@@ -2235,6 +2235,12 @@ impl RendezvousServer {
                 relay_id: selection.relay,
             });
         let exclusion_reasons = snapshot.exclusion_reasons(requirement);
+        // Ask the live path what it would do, rather than describing the rule's
+        // first entry. Spreading makes those differ, and a trace that reports a
+        // decision nothing makes is worse than no trace.
+        let selected_relay = snapshot
+            .select_geo(pa, pb, &eligible, requirement)
+            .map(|selection| pick_within(selection.candidates, pa));
         Ok(allocation_explain::explain_relay_selection(
             &configured,
             &eligible,
@@ -2243,6 +2249,7 @@ impl RendezvousServer {
             snapshot.config_generation,
             snapshot.health_snapshot_id,
             &exclusion_reasons,
+            selected_relay,
         ))
     }
 
@@ -3716,6 +3723,7 @@ mod starry_allocation_tests {
             7,
             "health-11".to_owned(),
             &exclusion_reasons,
+            None,
         );
         assert_eq!(trace.selection.kind, "rotation_prediction");
         assert_eq!(ROTATION_RELAY_SERVER.load(Ordering::SeqCst), 23);
@@ -3798,6 +3806,50 @@ mod relay_spreading_tests {
                 list.contains(&pick_within_pinned(list.clone(), client, false)),
                 "the unpinned choice must be one of the candidates"
             );
+        }
+    }
+
+    /// The allocation trace must report what the data plane would actually do.
+    ///
+    /// These are two separate code paths — `get_relay_server` for connections and
+    /// `explain_relay_server` for `allocation.simulate` — and they disagreed the
+    /// first time this change was verified: the simulation kept reporting the
+    /// rule's first entry while the live path spread clients, which is how I
+    /// nearly concluded the feature did not work. The trace now takes the live
+    /// decision as an argument, and this pins that they cannot drift again.
+    #[test]
+    fn the_trace_and_the_live_path_agree() {
+        let list = candidates();
+        for host in 1..=30u8 {
+            let client = ip(&format!("203.0.113.{host}"));
+            let live = pick_within(list.clone(), client);
+            assert!(
+                list.contains(&live),
+                "the live choice must be one of the rule's candidates"
+            );
+            // The trace is fed exactly this value, so agreement reduces to
+            // "the trace reports the argument it was given".
+            let reported = allocation_explain::explain_relay_selection(
+                &list,
+                &list,
+                Some(allocation_explain::MatchedRule {
+                    name: "rule".to_owned(),
+                    index: 0,
+                    direction: "direct".to_owned(),
+                    relay_id: list[0].clone(),
+                }),
+                0,
+                1,
+                "health-1".to_owned(),
+                &std::collections::HashMap::new(),
+                Some(live.clone()),
+            );
+            assert_eq!(
+                reported.selection.relay_id,
+                Some(live.clone()),
+                "the trace reported a relay the live path would not choose"
+            );
+            assert_eq!(reported.selection.kind, "geo_rule");
         }
     }
 
