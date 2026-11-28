@@ -24,7 +24,7 @@ English | [简体中文](DEVELOPMENT-PLAN.zh-CN.md)
 | P0-3 | Device groups and users | `/api/device-group/accessible`, `/api/users`, `/api/peers` | P0 | **Done.** `/api/peers` answers an empty page; the registry lives in the rendezvous DB |
 | P1-1 | Device self-enrolment | `/api/devices/deploy` | P1 | **Done.** Token issuance via `/api/admin/enrolment-token` |
 | P1-2 | TOTP second factor | `tfa_type` / `secret` on `/api/login` | P1 | **Done.** Two-step, single-use codes |
-| P1-3 | Address book conflict semantics | ETag / 409 on `/api/ab` | P1 | **Not started.** Legacy `/api/ab` is unchanged; the structured form has its own write path |
+| P1-3 | Address book conflict semantics | ETag and `If-Match` on `/api/ab` | P1 | **Done.** Version, opt-in 412, and the replaced document is recoverable. The client cannot send a precondition, so this protects scripts rather than the client |
 | P2-1 | Client audit upload | `/api/audit/{typ}`, `PUT /api/audit` | P2 | **Done, opt-in.** Separate table, advisory only |
 | P2-2 | API proxy on restricted networks | `HttpProxyRequest` | P2 | **Done.** Allow-list plus a real request, tested over a socket |
 | P2-3 | Session recording | `/api/record` | P2 | **Partial.** Endpoint and bookkeeping exist behind a flag; it counts bytes and stores no content |

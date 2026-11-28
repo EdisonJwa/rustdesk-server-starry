@@ -22,7 +22,7 @@
 | P0-3 | 设备组与用户 | `/api/device-group/accessible`、`/api/users`、`/api/peers` | P0 | **已完成。** `/api/peers` 返回空页：注册表在 rendezvous 库里 |
 | P1-1 | 设备自助上线 | `/api/devices/deploy` | P1 | **已完成。** 令牌签发走 `/api/admin/enrolment-token` |
 | P1-2 | TOTP 两步验证 | `/api/login` 的 `tfa_type` / `secret` | P1 | **已完成。** 两步，验证码一次性 |
-| P1-3 | 地址簿冲突语义 | `/api/ab` 的 ETag / 409 | P1 | **未开始。** legacy `/api/ab` 未改；结构化形态有自己的写入路径 |
+| P1-3 | 地址簿冲突语义 | `/api/ab` 的 ETag 与 `If-Match` | P1 | **已完成。** 版本号、可选的 412、被覆盖文档可恢复。客户端发不了前置条件，因此这保护的是脚本而非客户端 |
 | P2-1 | 客户端审计上传 | `/api/audit/{typ}`、`PUT /api/audit` | P2 | **已完成，需显式开启。** 独立表，仅供参考 |
 | P2-2 | 受限网络 API 代理 | `HttpProxyRequest` | P2 | **已完成。** 白名单 + 真实请求，在 socket 上测过 |
 | P2-3 | 会话录像 | `/api/record` | P2 | **部分。** 端点与记账在开关之后；只统计字节，不存内容 |

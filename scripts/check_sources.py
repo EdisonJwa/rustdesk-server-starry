@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
-"""Fail closed on the defect class that shipped a vulnerability in this session.
+"""Fail closed on the two defect classes that shipped from this repository.
 
-The production bug was not a typo: it was a *predicate shape*. The address book
-selected rows with `owner_id = ?1 or rule >= 1`, where `rule` is the book's share
-ceiling rather than a grant, so the second half was always true and every
-signed-in account could read every book.
+Neither was a typo. Both were shapes that compile and pass tests.
 
-The test suite was green because every e2e used a single account: "can A see B's
-data" was not expressible. So the durable fix is two things, and this gate is the
-second one — a check that the shape cannot come back.
+## 1. Address book access predicates
 
-## What this checks
+The production bug was `owner_id = ?1 or rule >= 1`, where `rule` is the book's
+share ceiling rather than a grant, so the second half was always true and every
+signed-in account could read every book. The e2e suite was green because each
+test used a single account: "can A see B's data" was not expressible.
 
-A query that reads `ab_books` and decides *access* must either
+A query that reads `ab_books` and decides *access* must either be
+ownership-only, or join `ab_shares`.
 
-- be ownership-only (`owner_id = ?N` and nothing else in the predicate), or
-- join `ab_shares`.
+## 2. Quotes in SQL comments
 
-An `ab_books` query that tests `rule >=` in its `where` clause without joining
-`ab_shares` is the exact shipped defect and is rejected, because `rule` is a
-ceiling that never identifies *who* may read.
+`SCHEMA` and the inline queries are Rust string literals holding SQL. A quote
+inside a SQL comment closes the literal early and the compiler reports a syntax
+error dozens of lines from the cause. This cost four compile cycles in one
+session; the check exists so it cannot cost a fifth.
 
 ## What this deliberately does not check
 
-Whether the predicate is *correct* in some deeper sense. That needs a human and
-the multi-account e2e tests, which is where this belongs. This gate only stops the
-specific shape from returning.
+Whether a predicate is correct in some deeper sense. That needs a human and the
+multi-account tests. This gate only stops the known shapes from returning.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# A whole SQL statement, from select to the end of its Rust literal.
+# A whole SQL statement, from its verb to the end of the Rust literal.
 QUERY = re.compile(r'"((?:select|insert|update|delete)[^"]*)"', re.IGNORECASE | re.DOTALL)
 
 
@@ -44,53 +42,61 @@ def rust_files() -> list[Path]:
     return sorted((ROOT / "src").rglob("*.rs"))
 
 
-def ab_books_queries(text: str) -> list[str]:
-    return [
-        match.group(1)
-        for match in QUERY.finditer(text)
-        if re.search(r"\bfrom\s+ab_books\b", match.group(1), re.IGNORECASE)
-    ]
-
-
 def check_access_predicates() -> list[str]:
+    """An `ab_books` query must gate access on ownership or an `ab_shares` join."""
     problems: list[str] = []
     for path in rust_files():
         text = path.read_text(encoding="utf-8")
-        line_of = lambda offset: text.count("\n", 0, offset) + 1
         for match in QUERY.finditer(text):
             query = match.group(1)
             if not re.search(r"\bfrom\s+ab_books\b", query, re.IGNORECASE):
                 continue
             lowered = " ".join(query.lower().split())
-
-            # Ownership by itself is fine.
-            ownership_only = re.search(
-                r"where\s+\(?\s*owner_id\s*=\s*\?\w+", lowered
-            ) and not re.search(r"\bor\b", lowered.split("where", 1)[-1])
-
             if "ab_shares" in lowered:
                 continue
+            where = lowered.split("where", 1)[-1] if "where" in lowered else ""
+            # Ownership on its own, with no alternative, is sufficient.
+            ownership_only = re.search(r"owner_id\s*=\s*\?\w+", where) and not re.search(
+                r"\bor\b", where
+            )
             if ownership_only:
                 continue
-            # A query that names `rule` as an access alternative is the defect.
-            if re.search(r"\brule\s*>=", lowered):
+            if re.search(r"\brule\s*>=", where):
+                line = text.count("\n", 0, match.start()) + 1
                 problems.append(
-                    f"{path.relative_to(ROOT)}:{line_of(match.start())}: "
-                    "an ab_books query gates access on `rule`, which is the book's "
-                    "share ceiling and not a grant. Visibility must be ownership or "
-                    f"an ab_shares row. Query: {lowered[:180]}"
+                    f"{path.relative_to(ROOT)}:{line}: an ab_books query gates access "
+                    "on `rule`, which is the book's share ceiling and not a grant. "
+                    "Visibility must be ownership or an ab_shares row. "
+                    f"Query: {lowered[:160]}"
+                )
+    return problems
+
+
+def check_sql_comments_are_quote_free() -> list[str]:
+    """A SQL comment line in one of our literals must not contain a quote."""
+    problems: list[str] = []
+    for path in rust_files():
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped.startswith("--"):
+                continue
+            if '"' in stripped:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{number}: a SQL comment contains a double "
+                    "quote, which closes the enclosing Rust literal. "
+                    f"Use a backtick or rephrase: {stripped[:90]}"
                 )
     return problems
 
 
 def main() -> int:
-    problems = check_access_predicates()
+    problems = check_access_predicates() + check_sql_comments_are_quote_free()
     if problems:
-        print("address book access rules violated:", file=sys.stderr)
+        print("source rules violated:", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
-    print("address book access OK: every ab_books predicate is ownership or a share")
+    print("source rules OK: address book access is explicit, SQL comments are quote-free")
     return 0
 
 

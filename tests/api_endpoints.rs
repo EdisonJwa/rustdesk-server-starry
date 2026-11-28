@@ -165,6 +165,29 @@ fn http_post_bearer(url: &str, body: Option<&Value>, token: Option<&str>) -> (u1
     )
 }
 
+/// POST with extra headers. Needed for `If-Match`, which the official client
+/// never sends and a script does.
+fn http_post_bearer_with_headers(
+    url: &str,
+    body: &Value,
+    token: &str,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    let mut request = minreq::post(url)
+        .with_timeout(10)
+        .with_header("Content-Type", "application/json")
+        .with_header("Authorization", format!("Bearer {token}"))
+        .with_body(serde_json::to_string(body).unwrap());
+    for (name, value) in headers {
+        request = request.with_header(*name, *value);
+    }
+    let response = request.send().expect("HTTP request failed");
+    (
+        u16::try_from(response.status_code).unwrap_or(0),
+        response.as_str().unwrap_or("").to_owned(),
+    )
+}
+
 fn http_put_bearer(url: &str, body: &Value, token: &str) -> (u16, String) {
     let response = minreq::put(url)
         .with_timeout(10)
@@ -1000,4 +1023,169 @@ fn sharing_grants_and_revokes_access_explicitly() {
         Some(&guest),
     );
     assert_eq!(status, 404, "a revoked share must stop working immediately");
+}
+
+// ---------------------------------------------------------------------------
+// Legacy address book: versions and lost updates
+//
+// The official client has no merge and never sends a precondition, so two
+// devices editing at once necessarily lose one side. These tests pin what the
+// server can still do about that: report a version, honour a precondition when a
+// script supplies one, and keep the document that got replaced.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/ab` and `POST /api/ab` round trip with a version, and a re-push of
+/// unchanged data is not counted as a write.
+#[test]
+fn legacy_address_book_reports_a_version() {
+    let _guard = gate();
+    let api = start_api_with("ab-version", &[]);
+    let token = login(&api);
+
+    // Nothing written yet: the answer is a literal null, as it has always been,
+    // so the client keeps treating the account as having no book.
+    let (status, body) = http_get_bearer(&format!("{}/api/ab", api.base), &token);
+    assert_eq!(status, 200, "a read with no book must be a normal empty answer");
+    assert_eq!(body.trim().to_lowercase(), "null");
+
+    let book = json!({"tags": ["office"], "peers": [], "tag_colors": "{}"}).to_string();
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": book})),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+
+    let (status, body) = http_get_bearer(&format!("{}/api/ab", api.base), &token);
+    assert_eq!(status, 200, "{body}");
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["data"], book, "the document must round-trip");
+
+    // Re-pushing the same document is idempotent: it must not look like a
+    // conflict, because the client re-pushes on every local edit.
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": book})),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+}
+
+/// A caller that states a version is protected; the official client does not, so
+/// this proves the script path rather than the client path.
+#[test]
+fn a_stale_precondition_is_refused_with_412() {
+    let _guard = gate();
+    let api = start_api_with("ab-etag", &[]);
+    let token = login(&api);
+
+    let first = json!({"tags": ["one"], "peers": [], "tag_colors": "{}"}).to_string();
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": first})),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+
+    // Read the version the server reports.
+    let (_, body) = http_get_bearer(&format!("{}/api/ab", api.base), &token);
+    let version = serde_json::from_str::<Value>(&body).unwrap();
+    let _ = version;
+
+    // Another writer moves the book on.
+    let second = json!({"tags": ["two"], "peers": [], "tag_colors": "{}"}).to_string();
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": second})),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+
+    // A writer holding the old version must be told, with 412 and not 409: a
+    // client that retries on 409 would loop here.
+    let stale = http_post_bearer_with_headers(
+        &format!("{}/api/ab", api.base),
+        &json!({"data": first}),
+        &token,
+        &[("If-Match", "\"ab-1\"")],
+    );
+    assert_eq!(stale.0, 412, "a stale precondition must be refused: {stale:?}");
+    let stale_body: Value = serde_json::from_str(&stale.1).unwrap();
+    assert_eq!(stale_body["error"], "AddressBookChanged");
+
+    // The precondition that matches succeeds.
+    let current = http_post_bearer_with_headers(
+        &format!("{}/api/ab", api.base),
+        &json!({"data": first}),
+        &token,
+        &[("If-Match", "\"ab-2\"")],
+    );
+    assert_eq!(current.0, 200, "{current:?}");
+}
+
+/// The document that a write replaced is recoverable, which is the only answer
+/// to the client's last-write-wins model.
+#[test]
+fn a_replaced_document_is_recoverable() {
+    let _guard = gate();
+    let api = start_api_with("ab-recover", &[]);
+    let token = login(&api);
+
+    let laptop = json!({"tags": ["laptop"], "peers": [], "tag_colors": "{}"}).to_string();
+    let desktop = json!({"tags": ["desktop"], "peers": [], "tag_colors": "{}"}).to_string();
+
+    // Device A pushes, then device B pushes without a precondition, which is
+    // exactly what the official client does.
+    http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": laptop})),
+        Some(&token),
+    );
+    http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": desktop})),
+        Some(&token),
+    );
+
+    // B's push won, but A's is not gone.
+    let (_, body) = http_get_bearer(&format!("{}/api/ab", api.base), &token);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["data"],
+        desktop,
+        "last write wins, as the client expects"
+    );
+
+    let (status, body) = http_get_bearer(&format!("{}/api/ab/previous", api.base), &token);
+    assert_eq!(status, 200, "{body}");
+    let previous: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        previous["data"], laptop,
+        "the replaced document must be recoverable: {previous}"
+    );
+    assert_eq!(previous["version"], 1, "it was version 1 when replaced");
+    assert!(
+        previous["superseded_count"].as_i64().unwrap() >= 1,
+        "a superseding write must be counted: {previous}"
+    );
+
+    // An unauthenticated caller must not read anyone's previous book.
+    let (status, _) = http_get(&format!("{}/api/ab/previous", api.base)).unwrap();
+    assert_eq!(status, 401);
+}
+
+/// A malformed `If-Match` is refused rather than treated as absent, or a caller
+/// would believe it had protection it did not have.
+#[test]
+fn a_malformed_precondition_is_refused() {
+    let _guard = gate();
+    let api = start_api_with("ab-badif", &[]);
+    let token = login(&api);
+    let book = json!({"tags": [], "peers": [], "tag_colors": "{}"}).to_string();
+    let (status, body) = http_post_bearer_with_headers(
+        &format!("{}/api/ab", api.base),
+        &json!({"data": book}),
+        &token,
+        &[("If-Match", "not-a-version")],
+    );
+    assert_eq!(status, 400, "{body}");
 }

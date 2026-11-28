@@ -380,7 +380,20 @@ create index if not exists sessions_expiry on sessions (expires_at);
 create table if not exists address_books (
     user_id integer primary key,
     document text not null,
-    updated_at integer not null
+    updated_at integer not null,
+    -- Monotonic per account. Every successful write bumps it, so a reader can
+    -- tell it holds the current book rather than one overwritten after its read,
+    -- without trusting clocks. An administrator script can send If-Match.
+    version integer not null default 1,
+    -- The previous body of a write that replaced a different one. Two devices
+    -- pushing alternately is the documented client behaviour (last write wins,
+    -- no merge), so this is what makes a lost update recoverable rather than
+    -- merely lost.
+    previous_document text,
+    previous_version integer,
+    -- Count of writes that discarded a different document. Non-zero tells an
+    -- operator that this account is being edited from more than one place.
+    superseded_count integer not null default 0
 );
 -- External identity bindings for OIDC login.
 --
@@ -881,6 +894,22 @@ fn mint_token(request: TokenRequest<'_>) -> Result<(String, String), String> {
 // State
 // ---------------------------------------------------------------------------
 
+/// One stored legacy address book and the version it is at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BookSnapshot {
+    pub document: String,
+    pub version: i64,
+}
+
+/// What one legacy write did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BookWriteOutcome {
+    /// Stored. `superseded` is true when a different document was replaced.
+    Written { version: i64, superseded: bool },
+    /// The caller's If-Match did not match, so nothing was written.
+    Stale { current: i64 },
+}
+
 pub(crate) struct ApiState {
     db: Connection,
     key: Arc<SigningKey>,
@@ -1118,14 +1147,18 @@ impl ApiState {
     }
 
     /// Reads one account's address book, or `None` when it was never pushed.
-    async fn address_book_get(&self, user_id: i64) -> Result<Option<String>, String> {
+    /// One account's legacy address book, with the version it represents.
+    async fn address_book_get(&self, user_id: i64) -> Result<Option<BookSnapshot>, String> {
         self.db
             .call(move |connection| {
-                let mut statement =
-                    connection.prepare("select document from address_books where user_id = ?1")?;
+                let mut statement = connection
+                    .prepare("select document, version from address_books where user_id = ?1")?;
                 let mut rows = statement.query([user_id])?;
                 match rows.next()? {
-                    Some(row) => Ok::<_, rusqlite::Error>(Some(row.get::<_, String>(0)?)),
+                    Some(row) => Ok::<_, rusqlite::Error>(Some(BookSnapshot {
+                        document: row.get(0)?,
+                        version: row.get(1)?,
+                    })),
                     None => Ok(None),
                 }
             })
@@ -1135,17 +1168,139 @@ impl ApiState {
 
     /// Replaces one account's address book. The client always pushes the whole
     /// document, so this is an upsert rather than a merge.
-    async fn address_book_put(&self, user_id: i64, document: &str) -> Result<(), String> {
+    ///
+    /// Two behaviours matter and are not the same:
+    ///
+    /// * The version always increases, so a reader can detect that it lost a
+    ///   race.
+    /// * When the write replaces a *different* document, the old one is kept in
+    ///   previous_document. The official client has no merge: it pushes the
+    ///   whole book and never sends a precondition, so two devices editing at
+    ///   once necessarily lose one side. Keeping the loser makes that
+    ///   recoverable instead of silent.
+    ///
+    /// A write that matches what is already stored does not bump the version and
+    /// does not count as superseding, so a client re-pushing an unchanged book —
+    /// which it does on every local edit — is not reported as a conflict.
+    async fn address_book_put(
+        &self,
+        user_id: i64,
+        document: &str,
+        expected_version: Option<i64>,
+    ) -> Result<BookWriteOutcome, String> {
         let document = document.to_owned();
         self.db
-            .call(move |connection| {
+            .call(move |connection| -> Result<BookWriteOutcome, rusqlite::Error> {
+                let now = epoch_seconds() as i64;
+                let current: Option<(String, i64)> = connection
+                    .query_row(
+                        "select document, version from address_books where user_id = ?1",
+                        [user_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .ok();
+
+                if let Some(expected) = expected_version {
+                    // A caller that states a version has opted into the
+                    // precondition, which is how an operator script avoids
+                    // clobbering. The official client never does this.
+                    let current_version = current.as_ref().map(|(_, version)| *version).unwrap_or(0);
+                    if expected != current_version {
+                        return Ok(BookWriteOutcome::Stale {
+                            current: current_version,
+                        });
+                    }
+                }
+
+                // Explicit `BookWriteOutcome` so the closure's error type is
+                // inferable: `Ok` is constructed bare in one branch.
+                let Some((previous, version)) = current else {
+                    connection.execute(
+                        "insert into address_books (user_id, document, updated_at, version)
+                         values (?1, ?2, ?3, 1)",
+                        rusqlite::params![user_id, document, now],
+                    )?;
+                    return Ok(BookWriteOutcome::Written {
+                        version: 1,
+                        superseded: false,
+                    });
+                };
+
+                if previous == document {
+                    // Idempotent re-push: nothing changed, so nothing happened.
+                    connection.execute(
+                        "update address_books set updated_at = ?2 where user_id = ?1",
+                        rusqlite::params![user_id, now],
+                    )?;
+                    return Ok(BookWriteOutcome::Written {
+                        version,
+                        superseded: false,
+                    });
+                }
+
+                let next = version.saturating_add(1);
                 connection.execute(
-                    "insert into address_books (user_id, document, updated_at) values (?1, ?2, ?3)
-                     on conflict(user_id) do update set document = excluded.document,
-                                                        updated_at = excluded.updated_at",
-                    rusqlite::params![user_id, document, epoch_seconds() as i64],
+                    "update address_books
+                     set document = ?2, updated_at = ?3, version = ?4,
+                         previous_document = ?5, previous_version = ?6,
+                         superseded_count = superseded_count + 1
+                     where user_id = ?1",
+                    rusqlite::params![user_id, document, now, next, previous, version],
                 )?;
-                Ok::<_, rusqlite::Error>(())
+                Ok(BookWriteOutcome::Written {
+                    version: next,
+                    superseded: true,
+                })
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// The document a write replaced, for recovery.
+    ///
+    /// Exposed through the API on purpose: a lost update is otherwise
+    /// undebuggable from the client's side, and the account owner is the only
+    /// person who should see their own previous book.
+    async fn address_book_previous(&self, user_id: i64) -> Result<Option<BookSnapshot>, String> {
+        self.db
+            .call(move |connection| {
+                let row: Option<(Option<String>, Option<i64>)> = connection
+                    .query_row(
+                        "select previous_document, previous_version
+                         from address_books where user_id = ?1",
+                        [user_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok();
+                match row {
+                    Some((Some(document), version)) if !document.is_empty() => {
+                        Ok::<_, rusqlite::Error>(Some(BookSnapshot {
+                            document,
+                            version: version.unwrap_or(0),
+                        }))
+                    }
+                    _ => Ok(None),
+                }
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// How many writes have discarded a different document for this account.
+    ///
+    /// Non-zero means the book is being edited from more than one place, which is
+    /// the observable symptom of the lost-update problem.
+    async fn address_book_superseded_count(&self, user_id: i64) -> Result<i64, String> {
+        self.db
+            .call(move |connection| {
+                let count = connection
+                    .query_row(
+                        "select superseded_count from address_books where user_id = ?1",
+                        [user_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+                Ok::<_, rusqlite::Error>(count)
             })
             .await
             .map_err(|err| err.to_string())
@@ -1565,6 +1720,8 @@ fn router(state: Arc<ApiState>) -> Router {
         // The client GETs to pull and POSTs to push the same opaque document.
         // A literal `null` means "no address book" and is a normal answer.
         .route("/api/ab", get(address_book).post(address_book_push))
+        // What the last write replaced, so a lost update is recoverable.
+        .route("/api/ab/previous", get(address_book_previous))
         // Structured address books. The client POSTs /api/ab/personal first and
         // falls back to the legacy single document only if that answers 404, so
         // these must all exist together or the feature stays dark.
@@ -2068,16 +2225,87 @@ async fn address_book(
         }
     };
     match state.address_book_get(user.id).await {
-        Ok(Some(document)) => Json(json!({
-            "data": document,
-            "licensed_devices": reader_licensed_devices(),
-        }))
-        .into_response(),
-        Ok(None) => Json(Value::Null).into_response(),
+        Ok(Some(snapshot)) => {
+            let etag = book_etag(snapshot.version);
+            // The body is byte-identical to what the client has always parsed;
+            // the version travels only in headers, which it ignores. That is what
+            // keeps this change safe for the official client and useful to a
+            // script.
+            let mut response = Json(json!({
+                "data": snapshot.document,
+                "licensed_devices": reader_licensed_devices(),
+            }))
+            .into_response();
+            let headers = response.headers_mut();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
+                headers.insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) =
+                axum::http::HeaderValue::from_str(&snapshot.version.to_string())
+            {
+                headers.insert("x-ab-version", value);
+            }
+            response
+        }
+        Ok(None) => {
+            let mut response = Json(Value::Null).into_response();
+            // A book that has never been written is version 0, so a script can
+            // create one with If-Match: "0" and mean it.
+            if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(0)) {
+                response.headers_mut().insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str("0") {
+                response
+                    .headers_mut()
+                    .insert("x-ab-version", value);
+            }
+            response
+        }
         Err(err) => {
             log::error!("cannot read the address book: {err}");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
         }
+    }
+}
+
+/// The opaque validator for a version.
+///
+/// A bare integer would be guessable, and `If-Match` compares strings, so the
+/// value is namespaced. Shape follows RFC 7232: a quoted entity-tag.
+fn book_etag(version: i64) -> String {
+    format!("\"ab-{version}\"")
+}
+
+/// What an `If-Match` header asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Precondition {
+    /// No header, or `*`: the caller is not asserting a version.
+    Any,
+    /// The caller requires this exact version.
+    At(i64),
+}
+
+/// Parses an `If-Match` header.
+///
+/// `Err(())` is a present-but-unusable value, which must not be treated as
+/// absent: that would silently ignore a caller's precondition.
+fn if_match_version(headers: &HeaderMap) -> Result<Precondition, ()> {
+    let Some(value) = headers.get(axum::http::header::IF_MATCH) else {
+        return Ok(Precondition::Any);
+    };
+    let value = value.to_str().map_err(|_| ())?;
+    let trimmed = value.trim();
+    if trimmed == "*" {
+        // RFC 7232: `*` means "any current representation exists".
+        return Ok(Precondition::Any);
+    }
+    let inner = trimmed.trim_matches('"');
+    match inner.strip_prefix("ab-") {
+        Some(number) => number
+            .parse::<i64>()
+            .map(Precondition::At)
+            .map_err(|_| ()),
+        None => Err(()),
     }
 }
 
@@ -2117,12 +2345,95 @@ async fn address_book_push(
     if serde_json::from_str::<Value>(&push.data).is_err() {
         return api_error(StatusCode::BAD_REQUEST, "ParamsError");
     }
-    match state.address_book_put(user.id, &push.data).await {
-        Ok(()) => Json(Value::Null).into_response(),
+    // A caller that sends `If-Match` has opted into the precondition. The official
+    // client never does, so this cannot make the client's own pushes fail; it is
+    // what lets a script avoid clobbering a book it read a moment ago.
+    let expected = match if_match_version(&headers) {
+        Ok(Precondition::Any) => None,
+        Ok(Precondition::At(version)) => Some(version),
+        Err(()) => return api_error(StatusCode::BAD_REQUEST, "InvalidIfMatch"),
+    };
+    match state.address_book_put(user.id, &push.data, expected).await {
+        Ok(BookWriteOutcome::Written { version, superseded }) => {
+            if superseded {
+                // Not an error — the client's model is last-write-wins — but it
+                // means someone lost an edit, so it must be visible.
+                log::warn!(
+                    "address book for account {} replaced a different document (now version {version})",
+                    user.name
+                );
+            }
+            let mut response = Json(Value::Null).into_response();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(version)) {
+                response.headers_mut().insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str(&version.to_string()) {
+                response
+                    .headers_mut()
+                    .insert("x-ab-version", value);
+            }
+            response
+        }
+        Ok(BookWriteOutcome::Stale { current }) => {
+            // 412, not 409: RFC 7232 requires this status for a failed
+            // `If-Match`, and a client that retries on 409 would loop.
+            let mut response = api_error(StatusCode::PRECONDITION_FAILED, "AddressBookChanged");
+            if let Ok(value) = axum::http::HeaderValue::from_str(&book_etag(current)) {
+                response.headers_mut().insert(axum::http::header::ETAG, value);
+            }
+            if let Ok(value) = axum::http::HeaderValue::from_str(&current.to_string()) {
+                response
+                    .headers_mut()
+                    .insert("x-ab-version", value);
+            }
+            response
+        }
         Err(err) => {
             log::error!("cannot store the address book: {err}");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
         }
+    }
+}
+
+/// `GET /api/ab/previous` — the document the last write replaced.
+///
+/// The official client has no merge, so a device that pushes after another one
+/// silently overwrites it. This is the only way the account owner can see what
+/// was lost, and it is scoped to their own book.
+async fn address_book_previous(
+    Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Response {
+    let user = match state.authenticate(&bearer(&headers).unwrap_or_default()).await {
+        Ok((_, user)) => user,
+        Err(AuthFailure::Unauthorized) => {
+            return api_error(StatusCode::UNAUTHORIZED, "Unauthorized")
+        }
+        Err(AuthFailure::Unavailable) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError")
+        }
+    };
+    let previous = match state.address_book_previous(user.id).await {
+        Ok(previous) => previous,
+        Err(err) => {
+            log::error!("cannot read the previous address book: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "SystemError");
+        }
+    };
+    let superseded = state
+        .address_book_superseded_count(user.id)
+        .await
+        .unwrap_or(0);
+    match previous {
+        Some(snapshot) => Json(json!({
+            "data": snapshot.document,
+            "version": snapshot.version,
+            // How many writes have discarded a different document. Non-zero means
+            // this book is being edited from more than one place.
+            "superseded_count": superseded,
+        }))
+        .into_response(),
+        None => Json(json!({"data": Value::Null, "superseded_count": superseded})).into_response(),
     }
 }
 
@@ -2545,6 +2856,66 @@ fn oidc_callback_page(status: StatusCode, message: &str) -> Response {
 
 async fn unknown_endpoint() -> Response {
     api_error(StatusCode::NOT_FOUND, "NotFound")
+}
+
+#[cfg(test)]
+mod address_book_version_tests {
+    use super::*;
+
+    /// The validator is a quoted entity-tag, as RFC 7232 requires.
+    #[test]
+    fn the_etag_is_a_quoted_entity_tag() {
+        assert_eq!(book_etag(0), "\"ab-0\"");
+        assert_eq!(book_etag(7), "\"ab-7\"");
+        // Round trips through the parser.
+        assert_eq!(
+            if_match_version(&headers_with("If-Match", &book_etag(7))),
+            Ok(Precondition::At(7))
+        );
+    }
+
+    fn headers_with(name: &'static str, value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, value.parse().expect("a valid header value"));
+        headers
+    }
+
+    #[test]
+    fn a_missing_if_match_asserts_nothing() {
+        assert_eq!(if_match_version(&HeaderMap::new()), Ok(Precondition::Any));
+    }
+
+    /// `*` means "any current representation exists", which is not a version
+    /// assertion.
+    #[test]
+    fn a_star_if_match_asserts_nothing() {
+        assert_eq!(
+            if_match_version(&headers_with("If-Match", "*")),
+            Ok(Precondition::Any)
+        );
+    }
+
+    /// A malformed precondition must be refused, not ignored: ignoring it would
+    /// let a caller believe it had protection it did not have.
+    #[test]
+    fn a_malformed_if_match_is_refused() {
+        for value in ["ab-", "ab-seven", "7", "ab-7-extra", "W/\"ab-7\""] {
+            assert_eq!(
+                if_match_version(&headers_with("If-Match", value)),
+                Err(()),
+                "{value:?} must be refused rather than ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unquoted_etag_is_accepted() {
+        // Some clients send the value unquoted; the digits are what matter.
+        assert_eq!(
+            if_match_version(&headers_with("If-Match", "ab-3")),
+            Ok(Precondition::At(3))
+        );
+    }
 }
 
 fn user_payload(user: &User) -> Value {
