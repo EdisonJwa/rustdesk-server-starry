@@ -1,6 +1,15 @@
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-RUN apk add --no-cache ca-certificates=20260611-r0
+# Pinned exactly, deliberately: the CA bundle is the one input in this image that
+# does not come from something already pinned (the base image is pinned by digest
+# and the binaries are copied in), so leaving the package unpinned would let the
+# trust store drift between identical builds.
+#
+# Alpine's main/ keeps only the latest build of a package, so this line fails
+# loudly with "unable to select packages" once the version is superseded — which
+# is what happened to 20260611-r0. Bump it then, rather than widening it to a
+# range such as >=20260611, which would accept whatever Alpine published next.
+RUN apk add --no-cache ca-certificates=20261020-r0
 
 ARG TARGETARCH
 COPY --chmod=755 ${TARGETARCH}/hbbs /usr/bin/hbbs

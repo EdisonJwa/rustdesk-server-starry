@@ -116,8 +116,20 @@ def main() -> None:
         "FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
         in dockerfile
     ), "runtime base image must match the reviewed multi-architecture digest"
-    assert "apk add --no-cache ca-certificates=20260611-r0" in dockerfile, (
-        "runtime CA package version must be fixed"
+    # The CA bundle is the only input to this image that is not itself pinned
+    # (the base image is pinned by digest and the binaries are copied in), so its
+    # version must be exact: a range such as `>=20260611` or a bare package name
+    # would let the trust store drift between builds of the same commit.
+    #
+    # Asserted as a shape rather than the literal version. Alpine's main/ keeps
+    # only the latest build of a package, so the pin has to be bumped when Alpine
+    # rotates it; naming the version here as well meant every bump had to be made
+    # twice, and this gate rejected a correct Dockerfile.
+    ca_install = re.search(r"apk add --no-cache ca-certificates=(\S+)", dockerfile)
+    assert ca_install, "runtime CA package must be installed with an exact version pin"
+    ca_version = ca_install.group(1)
+    assert re.fullmatch(r"\d{8}-r\d+", ca_version), (
+        f"runtime CA package pin is not an exact Alpine version: {ca_version!r}"
     )
     installer = (ROOT / "scripts/install_ci_tools.sh").read_text(encoding="utf-8")
     for pinned_input in (
