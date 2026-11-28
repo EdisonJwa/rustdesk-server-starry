@@ -102,5 +102,11 @@ tungstenite = { git = "https://github.com/rustdesk-org/tungstenite-rs", rev = "e
 # looking for a system library, which is the only option that works inside the
 # cross container — a `pre-build` hook compiling OpenSSL by hand is the same
 # thing with more to go wrong.
-[target.'cfg(target_env = "musl")'.dependencies]
+# Named by target rather than `cfg(target_env = "musl")`: `cargo tree --target`
+# evaluates the cfg and shows the feature, but the build resolved the dependency
+# graph without it and openssl-sys still looked for a system library. The explicit
+# triple cannot be misread.
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+[target.aarch64-unknown-linux-musl.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
