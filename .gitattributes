@@ -22,6 +22,10 @@ Cargo.lock text eol=lf
 # converts those files to CRLF so the digest never matches locally, while CI on
 # Linux stays green — a mismatch that trains people to ignore a red gate.
 *.json text eol=lf
+# Same reason, different fixture set: check_contracts.py pins the sha256 of each
+# auth/v1 token fixture, and `* text=auto` converts these .txt files to CRLF on a
+# Windows checkout. A fresh clone reproduced it, so this is not a precaution.
+contracts/auth/v1/fixtures/*.txt text eol=lf
 # CI verifies the vendored hbb_common with `diff -r` against the upstream
 # commit, and these fixtures are part of that comparison: any line-ending
 # conversion on checkout would surface as a spurious difference.
