@@ -158,7 +158,11 @@ pub(crate) async fn books_for(state: &ApiState, user_id: i64) -> Result<Vec<Book
 ///
 /// This is the endpoint that decides legacy versus structured mode, so it must
 /// be idempotent and cheap: the client calls it on every pull.
-pub(crate) async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Result<String, String> {
+pub(crate) async fn ensure_personal_book(
+    state: &ApiState,
+    user_id: i64,
+    import_legacy: bool,
+) -> Result<String, String> {
     let name = state.user_name(user_id).await?;
     state
         .db_call(move |connection| {
@@ -170,18 +174,203 @@ pub(crate) async fn ensure_personal_book(state: &ApiState, user_id: i64) -> Resu
                 )
                 .ok()
             {
+                // The book exists. Run the legacy import once, if it was never
+                // done and the caller is in a position to do it.
+                if import_legacy {
+                    import_legacy_book(connection, user_id, &guid)?;
+                }
                 return Ok::<_, rusqlite::Error>(guid);
             }
             let guid = uuid::Uuid::new_v4().to_string();
             let now = epoch_seconds() as i64;
             connection.execute(
                 "insert into ab_books (guid, owner_id, name, note, rule, personal, created_at, updated_at)
-                 values (?1, ?2, ?3, '', 3, 1, ?4, ?4)",
+                 values (?1, ?2, ?3, '', 1, 1, ?4, ?4)",
                 rusqlite::params![guid, user_id, name, now],
             )?;
+            if import_legacy {
+                import_legacy_book(connection, user_id, &guid)?;
+            }
             Ok(guid)
         })
         .await
+}
+
+/// Copies an account's legacy single-document book into the structured tables,
+/// exactly once.
+///
+/// This exists because of how the client chooses a shape: it re-reads
+/// `/api/ab/personal` on every start and treats a 200 as "use the structured
+/// model" (`legacyMode.value = _personalAbGuid == null`). A deployment that held
+/// legacy books therefore appears to lose them the moment these endpoints start
+/// answering — the data is still stored, but nothing reads it.
+///
+/// Deliberately a one-time import rather than a read-time merge:
+///
+/// * a merge would let two divergent copies of the same book feed each other
+///   forever, and there is no authority to say which side wins;
+/// * the legacy document is byte-identical in shape to the structured rows, so
+///   the import is lossless and the merge buys nothing.
+///
+/// The legacy row is *not* deleted. It stays as the rollback path, and as
+/// evidence if the import is ever suspected of losing something.
+fn import_legacy_book(
+    connection: &rusqlite::Connection,
+    user_id: i64,
+    guid: &str,
+) -> Result<(), rusqlite::Error> {
+    let already: bool = connection
+        .query_row(
+            "select 1 from ab_legacy_imports where owner_id = ?1",
+            [user_id],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if already {
+        return Ok(());
+    }
+    let document: Option<String> = connection
+        .query_row(
+            "select document from address_books where user_id = ?1",
+            [user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    let Some(document) = document else {
+        // Nothing to import; mark it anyway so a later pull does not re-check
+        // the legacy row on every request.
+        connection.execute(
+            "insert into ab_legacy_imports (owner_id, imported_at, peer_count, tag_count)
+             values (?1, ?2, 0, 0)",
+            rusqlite::params![user_id, epoch_seconds() as i64],
+        )?;
+        return Ok(());
+    };
+    // A legacy document the client could not parse is not something to guess at.
+    // Marking the account as imported with zero rows is wrong; leaving it
+    // unmarked means a later boot retries after an operator fixes it.
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&document) else {
+        hbb_common::log::warn!(
+            "legacy address book for account {user_id} is not JSON; not importing it"
+        );
+        return Ok(());
+    };
+
+    let mut peers = 0i64;
+    let mut tags = 0i64;
+
+    // Tag colours live in a nested JSON string, e.g. {"office":"#00ff00"}.
+    if let Some(raw) = parsed.get("tag_colors").and_then(|value| value.as_str()) {
+        if let Ok(colours) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(map) = colours.as_object() {
+                for (name, colour) in map {
+                    let colour = colour
+                        .as_str()
+                        .and_then(parse_hex_colour)
+                        .unwrap_or(0);
+                    connection.execute(
+                        "insert into ab_tags (guid, name, color) values (?1, ?2, ?3)
+                         on conflict(guid, name) do update set color = excluded.color",
+                        rusqlite::params![guid, name, colour],
+                    )?;
+                    tags += 1;
+                }
+            }
+        }
+    }
+    // A tag with no colour entry still exists.
+    if let Some(list) = parsed.get("tags").and_then(|value| value.as_array()) {
+        for name in list {
+            let Some(name) = name.as_str() else { continue };
+            let inserted = connection.execute(
+                "insert into ab_tags (guid, name, color) values (?1, ?2, 0)
+                 on conflict(guid, name) do nothing",
+                rusqlite::params![guid, name],
+            )?;
+            tags += inserted as i64;
+        }
+    }
+
+    if let Some(list) = parsed.get("peers").and_then(|value| value.as_array()) {
+        for peer in list {
+            let Some(id) = peer.get("id").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if id.trim().is_empty() {
+                continue;
+            }
+            let field = |name: &str| {
+                peer.get(name)
+                    .map(|value| match value {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            };
+            let tags_json = serde_json::to_string(
+                &peer
+                    .get("tags")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(Vec::new())),
+            )
+            .unwrap_or_else(|_| "[]".to_owned());
+            connection.execute(
+                "insert into ab_peers (guid, peer_id, hash, password, username, hostname,
+                                        platform, alias, tags, force_always_relay, rdp_port,
+                                        rdp_username, login_name, device_group_name, note,
+                                        same_server, updated_at)
+                 values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+                 on conflict(guid, peer_id) do nothing",
+                rusqlite::params![
+                    guid,
+                    id,
+                    field("hash"),
+                    field("password"),
+                    field("username"),
+                    field("hostname"),
+                    field("platform"),
+                    field("alias"),
+                    tags_json,
+                    if field("forceAlwaysRelay").eq_ignore_ascii_case("true") { 1 } else { 0 },
+                    field("rdpPort"),
+                    field("rdpUsername"),
+                    field("loginName"),
+                    field("device_group_name"),
+                    field("note"),
+                    None::<i64>,
+                    epoch_seconds() as i64,
+                ],
+            )?;
+            peers += 1;
+        }
+    }
+
+    connection.execute(
+        "insert into ab_legacy_imports (owner_id, imported_at, peer_count, tag_count)
+         values (?1, ?2, ?3, ?4)",
+        rusqlite::params![user_id, epoch_seconds() as i64, peers, tags],
+    )?;
+    if peers > 0 || tags > 0 {
+        hbb_common::log::info!(
+            "imported the legacy address book for account {user_id}: {peers} peers, {tags} tags"
+        );
+    }
+    Ok(())
+}
+
+/// `#rrggbb` or `#aarrggbb` into the client's ARGB integer.
+///
+/// The legacy document stores colours as CSS strings; the structured payload
+/// carries an integer, which is what the client's own colour picker writes.
+fn parse_hex_colour(raw: &str) -> Option<i64> {
+    let hex = raw.trim().trim_start_matches('#');
+    let value = i64::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        // RGB: the client's ARGB has a fully opaque alpha.
+        6 => Some(0xFF00_0000 | value),
+        8 => Some(value),
+        _ => None,
+    }
 }
 
 /// Whether the caller may write to a book.
@@ -612,7 +801,10 @@ pub(crate) async fn personal(
         Ok(id) => id,
         Err(auth) => return unauthorized(auth),
     };
-    match ensure_personal_book(&state, user_id).await {
+    // This is the endpoint whose 200 switches the client to the structured model,
+    // so it is the one place the legacy document must be carried over. Doing it
+    // anywhere else would either miss the transition or run on a read path.
+    match ensure_personal_book(&state, user_id, true).await {
         Ok(guid) => Json(json!({"guid": guid})).into_response(),
         Err(err) => {
             log::error!("cannot ensure personal address book: {err}");
@@ -680,7 +872,9 @@ pub(crate) async fn peers(
         Some(guid) if !guid.is_empty() => guid.to_owned(),
         // No `ab` means "my personal book", which is what the client does
         // before it has learned the guid.
-        _ => match ensure_personal_book(&state, user_id).await {
+        // Resolving the book for a read must not import: a GET that writes is a
+        // surprise, and the transition is already handled at /api/ab/personal.
+        _ => match ensure_personal_book(&state, user_id, false).await {
             Ok(guid) => guid,
             Err(err) => {
                 log::error!("cannot resolve personal book: {err}");

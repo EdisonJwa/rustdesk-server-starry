@@ -1189,3 +1189,68 @@ fn a_malformed_precondition_is_refused() {
     );
     assert_eq!(status, 400, "{body}");
 }
+
+/// A deployment that already holds a legacy book must not appear to lose it when
+/// the structured endpoints start answering.
+///
+/// This is the sharpest consequence of the two shapes coexisting: the client
+/// re-reads `/api/ab/personal` on every start (`legacyMode.value =
+/// _personalAbGuid == null`), so the moment that endpoint answers 200 the client
+/// switches to the structured model and stops reading `/api/ab` — and a legacy
+/// book that is not imported becomes invisible even though it is still stored.
+#[test]
+fn a_legacy_book_survives_the_switch_to_structured_mode() {
+    let _guard = gate();
+    let api = start_api_with("ab-upgrade", &[]);
+    let token = login(&api);
+
+    // A user who has been using the legacy shape all along.
+    let legacy = json!({
+        "tags": ["office"],
+        "peers": [{"id": "existing-host", "alias": "prod-db", "hash": "h", "tags": ["office"]}],
+        "tag_colors": "{\"office\":\"#00ff00\"}"
+    })
+    .to_string();
+    let (status, _) = http_post_bearer(
+        &format!("{}/api/ab", api.base),
+        Some(&json!({"data": legacy})),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+
+    // Now the structured endpoints exist, so the client will use them.
+    let (status, body) = http_post_bearer(&format!("{}/api/ab/personal", api.base), None, Some(&token));
+    assert_eq!(status, 200, "{body}");
+    let guid = serde_json::from_str::<Value>(&body).unwrap()["guid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The personal book must contain what the legacy book held, or the upgrade
+    // silently empties the user's address book.
+    let (_, body) = http_post_bearer(
+        &format!("{}/api/ab/peers?current=1&pageSize=100&ab={guid}", api.base),
+        None,
+        Some(&token),
+    );
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        listed["total"], 1,
+        "the legacy peer was not carried over, so the user sees an empty book: {listed}"
+    );
+    assert_eq!(listed["data"][0]["id"], "existing-host");
+    assert_eq!(listed["data"][0]["alias"], "prod-db");
+    assert_eq!(listed["data"][0]["hash"], "h");
+
+    let (_, body) = http_post_bearer(&format!("{}/api/ab/tags/{guid}", api.base), None, Some(&token));
+    let tags: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(tags[0]["name"], "office");
+    // The colour came from the legacy `tag_colors` string, which is nested JSON
+    // holding a CSS colour. The client's field is an ARGB integer, so #00ff00
+    // becomes fully opaque green.
+    assert_eq!(
+        tags[0]["color"].as_i64(),
+        Some(0xFF00_FF00),
+        "the legacy colour string must be converted to the client's ARGB integer: {tags}"
+    );
+}

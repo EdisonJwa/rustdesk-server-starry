@@ -475,6 +475,16 @@ create table if not exists ab_peers (
     primary key (guid, peer_id)
 );
 create index if not exists ab_peers_guid on ab_peers (guid);
+-- One row per account whose legacy document has been imported into the
+-- structured tables. A marker rather than a heuristic: whether the import
+-- happened must be answerable, and knowing it already ran is what makes
+-- `ensure_personal_book` safe to call on every pull.
+create table if not exists ab_legacy_imports (
+    owner_id integer primary key,
+    imported_at integer not null,
+    peer_count integer not null,
+    tag_count integer not null
+);
 create table if not exists ab_tags (
     guid text not null,
     name text not null,
