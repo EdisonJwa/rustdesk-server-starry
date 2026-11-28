@@ -3,7 +3,7 @@
 状态：研究完成（2026-11-28）
 结论：**对官方客户端能做"分流"和"排除"，不能做"测量择优"。** 原因在协议，不在实现。
 
-English | [简体中文](RELAY-SELECTION-FEASIBILITY.md)
+[English](RELAY-SELECTION-FEASIBILITY.md) | 简体中文
 
 ## 一、问题拆成两半
 
@@ -86,8 +86,8 @@ geo:
 
 ### 3.2 能做：稳定轮转，把"主备"变成"分担"
 
-现在同一规则内永远取 `first()`，第二台只在第一台 TCP 不可达时才用。改为按客户端稳定
-哈希取模：
+默认同一规则内仍取 `first()`，第二台只在第一台 TCP 不可达时才用。设
+`STARRY_RELAY_SPREAD=1` 后改为按客户端稳定哈希取模：
 
 ```rust
 let index = stable_hash(&client_addr) % candidates.len();
@@ -96,6 +96,9 @@ let index = stable_hash(&client_addr) % candidates.len();
 - 收益：一国多节点平时就分摊，而不是一台干活一台闲置。
 - 约 50 行 + 测试。
 - 同一客户端稳定落同一台，不影响连接复用。
+- **已实现，默认关闭**（`src/rendezvous_server.rs` 的 `pick_within`）。默认关的原因：
+  第二台常是另一个站点、有自己的带宽成本；且共享 NAT 出口的客户端会被哈希压到同一台。
+  开关的取舍见 [MULTI-NODE-SELECTION.zh-CN.md](MULTI-NODE-SELECTION.zh-CN.md) 第七节。
 
 ### 3.3 能做：服务端排除劣化节点（有前提）
 
@@ -146,7 +149,7 @@ hbbs 可以对自己的 `relay_servers` 做质量探测，但**只能用来排�
 
 **建议顺序**：
 
-1. **稳定轮转**（3.2）——最小改动，把闲置的第二台用起来。
+1. **稳定轮转**（3.2）——最小改动，把闲置的第二台用起来。**已完成，默认关**（`STARRY_RELAY_SPREAD=1`）。
 2. **规则分流**（3.1）——纯配置，立即可用。
 3. **阈值排除**（3.3）——防"半死"节点，避开 hbbs 视角的陷阱。
 4. 不做 3.4 的精细排序，除非我们同时维护客户端分支。

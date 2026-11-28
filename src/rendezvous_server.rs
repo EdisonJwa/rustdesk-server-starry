@@ -66,10 +66,11 @@ const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 
 /// Picks one relay out of a rule's candidates using the client's address.
 ///
-/// A GEO rule lists several relays for one country in a preference order, and
-/// taking the first entry leaves the rest idle until the first one fails — the
-/// pool behaves as hot standby rather than as capacity. This spreads the clients
-/// of a rule across its candidates while keeping two properties that matter:
+/// The default is the first candidate, i.e. a rule's list is a preference order
+/// and the rest of it is hot standby: the second relay only serves when the
+/// first fails its health probe. `STARRY_RELAY_SPREAD=1` turns the list into
+/// shared capacity instead, by hashing the client address into it, which keeps
+/// two properties that matter:
 ///
 /// * **stable**: the same client address always picks the same relay, so a
 ///   client does not jump between relays between connections, which would look
@@ -78,21 +79,23 @@ const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 ///   configured order still decides which relays are considered at all. The
 ///   health probe, not this function, is what removes a dead one.
 ///
+/// Spreading is opt-in rather than the default because it changes who a rule
+/// sends traffic to, and a rule's second relay is often a different site with
+/// its own bandwidth cost. It is also the wrong choice where many clients share
+/// one NAT address: the hash would pin that whole site onto a single relay. See
+/// docs/reference/MULTI-NODE-SELECTION.md.
+///
 /// Deliberately not load- or latency-aware. The client never reports either for
 /// a relay it has not connected to, and an hbbs-side measurement would reflect
 /// the hub's position rather than the client's — see
 /// docs/reference/RELAY-SELECTION-FEASIBILITY.md.
-///
-/// `STARRY_RELAY_PIN_TO_FIRST=1` restores the previous first-only behaviour,
-/// which is the sane thing to reach for if a deployment's exit addresses are
-/// concentrated behind one NAT and the hash pins a whole site onto one relay.
 pub(crate) fn pick_within(candidates: Vec<String>, client: IpAddr) -> String {
-    pick_within_pinned(candidates, client, pin_to_first())
+    pick_within_pinned(candidates, client, spread_enabled())
 }
 
-/// Whether a deployment asked for the previous first-only behaviour.
-fn pin_to_first() -> bool {
-    std::env::var("STARRY_RELAY_PIN_TO_FIRST")
+/// Whether a deployment asked for a rule's candidates to share the load.
+fn spread_enabled() -> bool {
+    std::env::var("STARRY_RELAY_SPREAD")
         .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
@@ -103,8 +106,8 @@ fn pin_to_first() -> bool {
 /// process environment: an environment variable set by one test races every
 /// other test in the same binary, which made the stability test flaky the first
 /// time it ran.
-fn pick_within_pinned(candidates: Vec<String>, client: IpAddr, pin_first: bool) -> String {
-    if pin_first || candidates.len() <= 1 {
+fn pick_within_pinned(candidates: Vec<String>, client: IpAddr, spread: bool) -> String {
+    if !spread || candidates.len() <= 1 {
         return candidates.into_iter().next().unwrap_or_default();
     }
     let index = client_hash(client) % candidates.len() as u64;
@@ -3759,7 +3762,7 @@ mod relay_spreading_tests {
         let mut seen = std::collections::HashSet::new();
         for host in 1..=60u8 {
             let client = ip(&format!("203.0.113.{host}"));
-            seen.insert(pick_within(list.clone(), client));
+            seen.insert(pick_within_pinned(list.clone(), client, true));
         }
         assert_eq!(
             seen.len(),
@@ -3768,14 +3771,32 @@ mod relay_spreading_tests {
         );
     }
 
+    /// Spreading must not be the default.
+    ///
+    /// A rule's list is a preference order, and its second entry is often a
+    /// different site with its own bandwidth cost. Turning the spare capacity on
+    /// has to be a deployment decision, not something a deploy does silently.
+    #[test]
+    fn a_rule_prefers_its_first_candidate_by_default() {
+        let list = candidates();
+        for host in 1..=20u8 {
+            let client = ip(&format!("203.0.113.{host}"));
+            assert_eq!(
+                pick_within_pinned(list.clone(), client, false),
+                "relay-a:21117",
+                "without the flag the rule is a preference order, not a pool"
+            );
+        }
+    }
+
     /// One client must not move between relays, or telemetry looks like flapping
     /// and any per-relay state is lost on every reconnect.
     #[test]
     fn the_choice_is_stable_for_a_client() {
         let client = ip("198.51.100.7");
-        let first = pick_within(candidates(), client);
+        let first = pick_within_pinned(candidates(), client, true);
         for _ in 0..20 {
-            assert_eq!(pick_within(candidates(), client), first);
+            assert_eq!(pick_within_pinned(candidates(), client, true), first);
         }
     }
 
@@ -3783,30 +3804,39 @@ mod relay_spreading_tests {
     #[test]
     fn a_single_candidate_is_returned() {
         let one = vec!["only:21117".to_owned()];
-        assert_eq!(pick_within(one.clone(), ip("198.51.100.7")), "only:21117");
-        assert_eq!(pick_within(Vec::new(), ip("198.51.100.7")), "");
+        for spread in [false, true] {
+            assert_eq!(
+                pick_within_pinned(one.clone(), ip("198.51.100.7"), spread),
+                "only:21117"
+            );
+            assert_eq!(
+                pick_within_pinned(Vec::new(), ip("198.51.100.7"), spread),
+                ""
+            );
+        }
     }
 
-    /// The escape hatch restores the previous behaviour, because a deployment
-    /// whose clients share one NAT would otherwise pin a whole site to one relay.
+    /// The flag turns the preference order into a shared pool.
     ///
     /// Passed as an argument rather than through the environment: a test that
     /// sets a process-wide variable races every other test in this binary.
     #[test]
-    fn pin_to_first_restores_the_old_behaviour() {
+    fn the_spread_flag_turns_the_pool_on() {
         let list = candidates();
+        let mut distinctive = false;
         for host in 1..=20u8 {
             let client = ip(&format!("203.0.113.{host}"));
-            assert_eq!(
-                pick_within_pinned(list.clone(), client, true),
-                "relay-a:21117"
-            );
-            // And with the flag off, the spread is live again.
+            let spread = pick_within_pinned(list.clone(), client, true);
             assert!(
-                list.contains(&pick_within_pinned(list.clone(), client, false)),
-                "the unpinned choice must be one of the candidates"
+                list.contains(&spread),
+                "the spread choice must be one of the candidates"
             );
+            distinctive |= spread != "relay-a:21117";
         }
+        assert!(
+            distinctive,
+            "the flag must move at least some clients off the first candidate"
+        );
     }
 
     /// The allocation trace must report what the data plane would actually do.

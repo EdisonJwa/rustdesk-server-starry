@@ -90,7 +90,7 @@ distinguishes ISPs.
 ### 3.2 Achievable: stable rotation, turning hot standby into sharing
 
 Today a rule always takes `first()`, so the second relay is used only when the first is TCP
-unreachable. A stable client hash changes that:
+unreachable. With `STARRY_RELAY_SPREAD=1` a stable client hash changes that:
 
 ```rust
 let index = stable_hash(&client_addr) % candidates.len();
@@ -99,6 +99,10 @@ let index = stable_hash(&client_addr) % candidates.len();
 - Gain: several relays in one country share the load instead of one idling.
 - About 50 lines plus tests.
 - A given client stays on one relay, so connection reuse is unaffected.
+- **Implemented, off by default** (`pick_within` in `src/rendezvous_server.rs`). Off because the
+  second entry is often a different site with its own bandwidth cost, and because clients behind
+  one shared NAT address would all hash onto a single relay. The trade-off is in
+  [MULTI-NODE-SELECTION.md](MULTI-NODE-SELECTION.md), section 7.
 
 ### 3.3 Achievable: exclude a degraded node, with a precondition
 
@@ -154,6 +158,7 @@ change at all.
 **Suggested order**:
 
 1. **Stable rotation** (3.2) — smallest change, puts the idle second relay to work.
+   **Done, off by default** (`STARRY_RELAY_SPREAD=1`).
 2. **Rule split** (3.1) — configuration only, usable immediately.
 3. **Threshold exclusion** (3.3) — protects against a half-dead node without the hub's bias.
 4. Skip 3.4's fine ranking unless we also maintain a client fork.

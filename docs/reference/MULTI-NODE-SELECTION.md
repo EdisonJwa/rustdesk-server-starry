@@ -1,14 +1,14 @@
 # Choosing among several relays in one country — how it works today, and what could change
 
-Status: current behaviour verified (2026-11-28); improvements not implemented
+Status: current behaviour verified (2026-11-28); option B implemented as an opt-in flag
 Applies to: `geo_relay` / `relay_observer` / `relay_quality`
 
 English | [简体中文](MULTI-NODE-SELECTION.zh-CN.md)
 
 ## 1. The answer first
 
-**There is no "best of several" today.** With several relays in one country, selection is the
-**stable intersection in configured order**:
+**There is no measured "best of several" today.** With several relays in one country, the
+default selection is the **stable intersection in configured order**:
 
 ```
 a GEO rule matches
@@ -20,6 +20,10 @@ a GEO rule matches
 Three things affect the outcome: which GEO rule the client's IP lands in, the order the relays
 were written in that rule, and whether each relay's TCP handshake succeeds at this moment.
 **Latency, load, bandwidth and past success rate play no part.**
+
+That default makes a rule's list a preference order, with the second relay hot standby.
+Setting `STARRY_RELAY_SPREAD=1` turns the list into a shared pool instead by hashing the
+client address into it — that is option B below, and it is still not quality-aware.
 
 ## 2. The chain, at code level
 
@@ -114,7 +118,8 @@ never take this path.
 | First down | `check_relay_servers` marks it unavailable within three seconds; traffic moves to the second |
 
 **So it is hot standby, not selection.** With several relays per country that wastes redundancy:
-the second is idle until a failure.
+the second is idle until a failure. Option B removes that waste, but only when a deployment
+opts in, because it changes which site serves whom.
 
 ## 5. Improvement options, by feasibility
 
@@ -156,8 +161,11 @@ let index = stable_hash(&client_addr) % candidates.len();
   reuse is unaffected.
 - **Limit**: still not quality-aware — but it removes the most visible waste.
 
-**I would do this first.** Low risk, direct benefit: several relays go from hot standby to
-sharing.
+**Implemented, behind `STARRY_RELAY_SPREAD=1`.** `pick_within` in `rendezvous_server.rs` hashes
+the client address (FNV-1a, IPv4 in full and IPv6 by /64) into the candidates that the health
+probe already kept. It is not the default: a rule's second entry is often a different site with
+its own bandwidth cost, and where many clients share one NAT address the hash would pin a whole
+building onto one relay. Leave the flag unset and a rule behaves exactly as in section 4.
 
 ### Option C — passive measurement from the server (medium effort)
 
@@ -187,7 +195,7 @@ maintain a client fork, this path is closed.
 | Step | Option | Why |
 | --- | --- | --- |
 | 1 | **A (rule split)** | Zero risk, zero code, immediately makes several relays share |
-| 2 | **B (weighted rotation)** | ~50 lines, turns hot standby into sharing; best return |
+| 2 | **B (weighted rotation)** — done, opt-in | ~50 lines, turns hot standby into sharing; enable with `STARRY_RELAY_SPREAD=1` |
 | 3 | the "exclude degraded" subset of C | threshold only, no fine ranking — this avoids the hbbs-vantage limitation |
 | not | D | official clients cannot use it; keep the existing code and keep it off |
 
@@ -202,5 +210,7 @@ These decide how to configure, not how to implement:
 3. **Relay cost against experience**: option C's probe traffic is small but, if relays are billed
    by traffic, its acceptance has to be confirmed.
 
-**I would not touch option B's hashing strategy before 1 and 2 are answered** — the wrong choice
-makes the imbalance worse. Option A is unaffected by either, so it can go first.
+**Because 2 is unanswered, B ships off by default.** The mechanism is in place and tested, but
+turning it on for a country is a deployment decision: it needs the egress addresses of that
+country's clients to be spread out, and it needs the second relay to be a place you are willing
+to send half the traffic to.
