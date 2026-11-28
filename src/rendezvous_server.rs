@@ -2203,9 +2203,8 @@ impl RendezvousServer {
             return "".to_owned();
         }
         if let Some(selection) = snapshot.select_geo(pa, pb, &eligible, requirement) {
-            // A GEO rule names several relays for one country, but taking its
-            // first entry leaves the rest idle until a failure. Spread the
-            // clients of that rule across its candidates instead.
+            // The rule's candidates are a preference order unless the deployment
+            // asked for them to share the load; `pick_within` owns that choice.
             return pick_within(selection.candidates, pa);
         }
         if eligible.len() == 1 {
