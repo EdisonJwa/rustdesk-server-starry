@@ -45,10 +45,13 @@ curl -fsSL https://www.openssl.org/source/openssl-3.3.2.tar.gz -o openssl.tar.gz
 mkdir -p src
 tar -xzf openssl.tar.gz -C src --strip-components=1
 cd src
-CC=x86_64-linux-musl-gcc ./Configure linux-x86_64 no-shared no-tests no-legacy --prefix=/opt/musl-openssl --openssldir=/opt/musl-openssl/ssl
-make -j"$(nproc)" build_libs >/dev/null
-make install_sw >/dev/null
-test -d /opt/musl-openssl/lib
+CC=x86_64-linux-musl-gcc ./Configure linux-x86_64 no-shared no-tests no-legacy --libdir=lib --prefix=/opt/musl-openssl --openssldir=/opt/musl-openssl/ssl
+make -j"$(nproc)" build_libs
+make install_sw
+# Fail loudly with the layout if the pin did not hold: a bare `test -d` here was
+# silent for one whole CI round.
+ls /opt/musl-openssl
+test -f /opt/musl-openssl/lib/libssl.a || { echo "no static libssl.a under lib/"; exit 1; }
 echo 'static OpenSSL 3.3.2 installed under /opt/musl-openssl'
 """,
 ]
@@ -66,10 +69,13 @@ curl -fsSL https://www.openssl.org/source/openssl-3.3.2.tar.gz -o openssl.tar.gz
 mkdir -p src
 tar -xzf openssl.tar.gz -C src --strip-components=1
 cd src
-CC=aarch64-linux-musl-gcc ./Configure linux-aarch64 no-shared no-tests no-legacy --prefix=/opt/musl-openssl --openssldir=/opt/musl-openssl/ssl
-make -j"$(nproc)" build_libs >/dev/null
-make install_sw >/dev/null
-test -d /opt/musl-openssl/lib
+CC=aarch64-linux-musl-gcc ./Configure linux-aarch64 no-shared no-tests no-legacy --libdir=lib --prefix=/opt/musl-openssl --openssldir=/opt/musl-openssl/ssl
+make -j"$(nproc)" build_libs
+make install_sw
+# Fail loudly with the layout if the pin did not hold: a bare `test -d` here was
+# silent for one whole CI round.
+ls /opt/musl-openssl
+test -f /opt/musl-openssl/lib/libssl.a || { echo "no static libssl.a under lib/"; exit 1; }
 echo 'static OpenSSL 3.3.2 installed under /opt/musl-openssl'
 """,
 ]
