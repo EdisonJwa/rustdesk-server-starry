@@ -503,6 +503,14 @@ jobs:
 
       - name: Cross-compile static binaries
         working-directory: _server
+        # The Cross.toml pre-build hook installs a static OpenSSL under
+        # /opt/musl-openssl, and these tell openssl-sys to use it instead of
+        # looking for a system library. They have to be set here rather than in
+        # the hook: each pre-build entry is a separate shell, so an export cannot
+        # reach cargo.
+        env:
+          OPENSSL_DIR: /opt/musl-openssl
+          OPENSSL_STATIC: "1"
         run: >-
           cross build --target "${{ matrix.target }}"
           --locked --release --bins
