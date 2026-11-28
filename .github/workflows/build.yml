@@ -501,19 +501,23 @@ jobs:
           --rev "${CROSS_REVISION}"
           --locked
 
+      # Renamed for the build because cross derives the custom image tag from the
+      # workspace directory name: `cross-custom-_server:<target>-pre-build` is not
+      # a legal Docker tag (underscores are not allowed), and docker rejects it
+      # with "invalid reference format". Only this job needs the rename, so it is
+      # done here rather than by renaming the directory everywhere.
       - name: Cross-compile static binaries
-        working-directory: _server
-        # The Cross.toml pre-build hook installs a static OpenSSL under
-        # /opt/musl-openssl, and these tell openssl-sys to use it instead of
-        # looking for a system library. They have to be set here rather than in
-        # the hook: each pre-build entry is a separate shell, so an export cannot
-        # reach cargo.
-        env:
-          OPENSSL_DIR: /opt/musl-openssl
-          OPENSSL_STATIC: "1"
-        run: >-
-          cross build --target "${{ matrix.target }}"
-          --locked --release --bins
+        run: |
+          set -euo pipefail
+          mv _server server-src
+          cd server-src
+          # The Cross.toml pre-build hook installs a static OpenSSL under
+          # /opt/musl-openssl; these tell openssl-sys to use it instead of looking
+          # for a system library. Set here because each pre-build entry is its own
+          # shell, so an export inside the hook cannot reach cargo.
+          export OPENSSL_DIR=/opt/musl-openssl
+          export OPENSSL_STATIC=1
+          cross build --target "${{ matrix.target }}" --locked --release --bins
 
       - name: Collect Linux release assets
         env:
@@ -525,12 +529,12 @@ jobs:
           mkdir artifact
           for binary in hbbs hbbr rustdesk-utils starry-control-agent starry-relayctl \
             starry-audit-export starry-client-config starry-api; do
-            install -m 0755 "_server/target/${TARGET}/release/${binary}" \
+            install -m 0755 "server-src/target/${TARGET}/release/${binary}" \
               "artifact/${binary}-${RELEASE_TAG}-linux-${ARCH}"
           done
           tar --sort=name --mtime='UTC 1970-01-01' \
             --owner=0 --group=0 --numeric-owner \
-            -C "_server/target/${TARGET}/release" -cf - \
+            -C "server-src/target/${TARGET}/release" -cf - \
             hbbs hbbr rustdesk-utils starry-control-agent starry-relayctl \
             starry-audit-export starry-client-config starry-api \
             | gzip -n > \
