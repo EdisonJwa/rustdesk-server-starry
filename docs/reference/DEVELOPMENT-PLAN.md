@@ -30,7 +30,7 @@ English | [简体中文](DEVELOPMENT-PLAN.zh-CN.md)
 | P2-3 | Session recording | `/api/record` | P2 | **Partial.** Endpoint and bookkeeping exist behind a flag; it counts bytes and stores no content |
 | P3-1 | Session keep-alive | `HealthCheck` | P3 | **Done.** Answered with an empty frame in the listener |
 | P3-2 | LAN discovery | `PeerDiscovery` | P3 | **Not needed server-side.** Multicast between peers |
-| P3-3 | Device switch grant | `/api/switch-grant` | P3 | **Not started.** Needs a device-identity design first |
+| P3-3 | Device switch grant | `/api/switch-grant` | P3 | **Designed, deferred.** [The design](DEVICE-IDENTITY-GRANT.md) shows it needs no new table but has no consumer: it is audit, not authorisation. Not implemented until an audit requirement exists |
 
 Everything marked Done has unit tests, an e2e in `tests/api_endpoints.rs` where it
 has a wire contract, and a mutation proving the gate catches a regression. The
