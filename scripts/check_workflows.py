@@ -163,7 +163,7 @@ def main() -> None:
     # the committed blob is LF, and that must not fail the gate.
     lock_text = lockfile.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(lock_text).hexdigest() == (
-        "e1cd2147d6ec0766c56a6b92514e9ba9505e7905730bd51f51a9ca072760f612"
+        "0585c8801abf009bdf2368acd5529b2c97bb4735ba8f128a280bf87f895e2510"
     ), "the fixed Cargo dependency graph changed without review"
     vendored = (ROOT / "libs/hbb_common.VENDORED").read_text(encoding="utf-8")
     assert re.search(r"(?m)^# commit:  [0-9a-f]{40} ", vendored), (

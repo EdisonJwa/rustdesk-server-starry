@@ -94,3 +94,13 @@ strip = true
 
 [patch.crates-io]
 tungstenite = { git = "https://github.com/rustdesk-org/tungstenite-rs", rev = "efce47e5364f00a63302cf07ab1fb13ded478914" }
+
+# The static musl release links OpenSSL, because `native-tls` is an unconditional
+# dependency of the vendored hbb_common (both tungstenite crates and
+# src/proxy.rs use it). The cross musl images ship no OpenSSL at all, so
+# openssl-sys must build one. `vendored` does that against the target instead of
+# looking for a system library, which is the only option that works inside the
+# cross container — a `pre-build` hook compiling OpenSSL by hand is the same
+# thing with more to go wrong.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

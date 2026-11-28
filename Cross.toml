@@ -1,6 +1,14 @@
 # The cross driver is pinned separately in the release workflow. Pinning these
 # image manifests prevents that fixed driver from resolving its mutable `main`
 # image tags during release builds.
+#
+# openssl is NOT handled here. The static musl binaries need it, because
+# `native-tls` is an unconditional dependency of the vendored hbb_common (both
+# tungstenite crates and src/proxy.rs use it), and these images ship no OpenSSL at
+# all — `musl.sh` has no reference to it. Cargo.toml solves that with
+# `openssl` + feature `vendored` under `cfg(target_env = "musl")`, which builds
+# the library against the target from source. A pre-build hook here would be the
+# same build with more to go wrong.
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:d54fdde7f1b680901a0bb21a2952e4921172b94c17e48603ccbbaeca8b5ef7e8"
 
