@@ -55,10 +55,14 @@ class DocumentationTests(unittest.TestCase):
         english = WIKI / "deployment/Orphan.md"
         chinese = WIKI / "deployment/ZH-CN-Orphan.md"
         self.assertIn((english, chinese), paired_documents([chinese]))
+
+    def test_reference_documents_are_not_forced_to_be_bilingual(self) -> None:
+        # Only the root README and the Wiki guides are kept in two languages;
+        # a single-language reference contract must not be reported missing.
         reference = DOCS / "reference/orphan.md"
-        self.assertIn(
-            (reference, reference.with_suffix(".zh-CN.md")),
+        self.assertEqual(
             paired_documents([reference.with_suffix(".zh-CN.md")]),
+            [(ROOT / "README.md", DOCS / "project/README.zh-CN.md")],
         )
 
     def test_duplicate_wiki_filenames_are_rejected(self) -> None:
@@ -127,7 +131,7 @@ class DocumentationTests(unittest.TestCase):
             self.assertEqual((output / "README.md").read_text(encoding="utf-8"), readme)
 
     def test_historical_tag_and_third_party_links_are_preserved(self) -> None:
-        source = DOCS / "releases/RELEASE-NOTES-patch-v1.2.0.md"
+        source = DOCS / "archive/releases/RELEASE-NOTES-patch-v1.2.0.md"
         historical = f"{self.base}/blob/1.1.16-patch-v1.2.0/CONTAINER.md"
         self.assertIsNone(local_target(source, historical, self.pages))
         self.assertIn(historical, render(source, self.pages, "a" * 40, REPOSITORY))

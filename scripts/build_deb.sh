@@ -18,7 +18,7 @@ case "$component" in
     hbbs)
         package="rustdesk-server-starry-hbbs"
         installed_binary="hbbs"
-        description="RustDesk HBBS with the Starry overlay"
+        description="RustDesk HBBS with Starry Geo Relay selection"
         details="Official RustDesk Server HBBS with Starry Geo Relay selection, Secure TCP, and optional WebSocket Signal."
         ;;
     hbbr)

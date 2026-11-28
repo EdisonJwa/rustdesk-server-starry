@@ -25,6 +25,13 @@ def managed_markdown() -> list[Path]:
 
 
 def paired_documents(documents: list[Path]) -> list[tuple[Path, Path]]:
+    """Return the (English, Chinese) pairs that must both exist.
+
+    Only the reader-facing guides are kept bilingual: the root README and the
+    Wiki/guide pages. Reference contracts, release records, container manual
+    and maintenance notes are single-language, so a one-line change no longer
+    costs two files.
+    """
     root_pair = (ROOT / "README.md", DOCS / "project/README.zh-CN.md")
     pairs = {root_pair}
     for document in documents:
@@ -32,12 +39,10 @@ def paired_documents(documents: list[Path]) -> list[tuple[Path, Path]]:
             continue
         if document.is_relative_to(DOCS / "archive"):
             continue  # Historical records retain their original language.
-        if document.is_relative_to(WIKI):
-            english = document.with_name(document.name.removeprefix("ZH-CN-"))
-            chinese = english.with_name(f"ZH-CN-{english.name}")
-        else:
-            english = document.with_name(document.name.replace(".zh-CN.md", ".md"))
-            chinese = english.with_suffix(".zh-CN.md")
+        if not document.is_relative_to(WIKI):
+            continue  # Reference, releases, container and project notes are single-language.
+        english = document.with_name(document.name.removeprefix("ZH-CN-"))
+        chinese = english.with_name(f"ZH-CN-{english.name}")
         pairs.add((english, chinese))
     return sorted(pairs)
 
