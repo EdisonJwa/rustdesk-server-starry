@@ -1,8 +1,8 @@
 use clap::App;
 mod common;
 mod fast_media_relay;
-mod relay_enrollment;
 mod ops_surface;
+mod relay_enrollment;
 mod relay_server;
 // HBBR is its own binary and compiles the modules it needs directly rather than
 // linking the hbbs library. `telemetry` is deliberately config-free so it can be

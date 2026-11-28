@@ -72,8 +72,8 @@ const TELEMETRY_REPLAY_CAPACITY: usize = 4_096;
 const PROBE_IP_BUCKET_CAPACITY: usize = 4_096;
 const BANDWIDTH_EMA_ALPHA_BASIS_POINTS: u32 = 2_500;
 static SINGLE_BANDWIDTH: AtomicUsize = AtomicUsize::new(128 * 1024 * 1024); // in bit/s
-// Only the relay request that opens a pair is a framed message of ours; pairing lifts this
-// for a leg that stays framed.
+                                                                            // Only the relay request that opens a pair is a framed message of ours; pairing lifts this
+                                                                            // for a leg that stays framed.
 const MAX_RELAY_REQUEST_LEN: usize = 128 << 10;
 // Fixed at the handshake, so it is sized for the session a websocket leg carries once paired.
 const WS_BUFFER_SIZE: usize = 64 << 10;
@@ -84,11 +84,7 @@ const BLACKLIST_FILE: &str = "blacklist.txt";
 const BLOCKLIST_FILE: &str = "blocklist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
-pub async fn start_with_bind(
-    bind_addr: Option<IpAddr>,
-    port: &str,
-    key: &str,
-) -> ResultType<()> {
+pub async fn start_with_bind(bind_addr: Option<IpAddr>, port: &str, key: &str) -> ResultType<()> {
     if sodiumoxide::init().is_err() {
         bail!("cannot initialize telemetry authentication");
     }
@@ -389,7 +385,11 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-fn bounded_request_header<'a>(request: &'a http::Request<()>, name: &str, max: usize) -> Option<&'a str> {
+fn bounded_request_header<'a>(
+    request: &'a http::Request<()>,
+    name: &str,
+    max: usize,
+) -> Option<&'a str> {
     let value = request.headers().get(name)?.to_str().ok()?;
     (!value.is_empty() && value.len() <= max).then_some(value)
 }
@@ -408,9 +408,7 @@ fn authenticate_telemetry_request(request: &http::Request<()>) -> Option<String>
     }
     let signature = bounded_request_header(request, "x-starry-telemetry-auth", 64)?;
     let tag = hex_decode_tag(signature)?;
-    let canonical = format!(
-        "starry-telemetry-request-v1\n{timestamp}\n{nonce}\n/ws/telemetry"
-    );
+    let canonical = format!("starry-telemetry-request-v1\n{timestamp}\n{nonce}\n/ws/telemetry");
     if !auth::verify(&tag, canonical.as_bytes(), key) {
         return None;
     }
@@ -432,7 +430,12 @@ fn load_basis_points(value: usize, capacity: usize) -> u32 {
 fn is_draining() -> bool {
     let statically_draining = crate::common::env_var("STARRY_RELAY_DRAINING")
         .ok()
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
     statically_draining
         || crate::common::env_var("STARRY_RELAY_DRAINING_FILE")
@@ -523,7 +526,9 @@ fn telemetry_payload() -> String {
     let fast_media = crate::fast_media_relay::runtime_snapshot();
     let draining = is_draining();
     let admission_open = !draining && load.active_sessions < load.capacity_sessions;
-    let sequence = TELEMETRY_SEQUENCE.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+    let sequence = TELEMETRY_SEQUENCE
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
     let fast_media_payload = serde_json::json!({
         "protocol": crate::fast_media_relay::PROTOCOL_VERSION,
         "enabled": fast_media.enabled,
@@ -600,9 +605,7 @@ fn add_authenticated_telemetry_headers(
         return false;
     };
     let payload = telemetry_payload();
-    let canonical = format!(
-        "starry-telemetry-response-v1\n{request_nonce}\n{payload}"
-    );
+    let canonical = format!("starry-telemetry-response-v1\n{request_nonce}\n{payload}");
     let signature = hex_encode(auth::authenticate(canonical.as_bytes(), key).as_ref());
     for (name, value) in [
         ("x-starry-telemetry", payload),
@@ -706,10 +709,8 @@ impl RelayLoadGuard {
                 / 4
         };
         if bandwidth_bps >= self.bandwidth_bps {
-            ACTIVE_RELAY_BANDWIDTH_BPS.fetch_add(
-                bandwidth_bps - self.bandwidth_bps,
-                Ordering::SeqCst,
-            );
+            ACTIVE_RELAY_BANDWIDTH_BPS
+                .fetch_add(bandwidth_bps - self.bandwidth_bps, Ordering::SeqCst);
         } else {
             atomic_saturating_sub(
                 &ACTIVE_RELAY_BANDWIDTH_BPS,
@@ -1240,7 +1241,11 @@ async fn make_pair_(
 
 /// Removes a waiting connection only if it still owns the requested pair ID.
 fn expire_waiter(peers: &mut HashMap<String, WaitingPeer>, id: &str, generation: &Arc<()>) -> bool {
-    if peers.get(id).map(|(current, _)| Arc::ptr_eq(current, generation)).unwrap_or(false) {
+    if peers
+        .get(id)
+        .map(|(current, _)| Arc::ptr_eq(current, generation))
+        .unwrap_or(false)
+    {
         peers.remove(id);
         return true;
     }
@@ -1389,10 +1394,16 @@ mod tests {
         }
         /// Simulates a relay write for the test stream.
         async fn send_raw(&mut self, _: Bytes) -> ResultType<()> {
-            if self.blocked { std::future::pending().await } else { Ok(()) }
+            if self.blocked {
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
         }
         /// Uses non-WebSocket framing for the test stream.
-        fn is_ws(&self) -> bool { false }
+        fn is_ws(&self) -> bool {
+            false
+        }
         /// Leaves the test stream unchanged when raw mode is requested.
         fn set_raw(&mut self) {}
         fn set_max_packet_length(&mut self, _: usize) {}
@@ -1401,19 +1412,37 @@ mod tests {
     /// Checks that a blocked relay write ends with a timeout in the selected direction.
     async fn check_blocked_send(from_peer: bool) {
         let mut stream = TestStream {
-            data: if from_peer { None } else { Some(BytesMut::from(&b"x"[..])) },
+            data: if from_peer {
+                None
+            } else {
+                Some(BytesMut::from(&b"x"[..]))
+            },
             blocked: from_peer,
         };
         let mut peer: Box<dyn StreamTrait> = Box::new(TestStream {
-            data: if from_peer { Some(BytesMut::from(&b"x"[..])) } else { None },
+            data: if from_peer {
+                Some(BytesMut::from(&b"x"[..]))
+            } else {
+                None
+            },
             blocked: !from_peer,
         });
-        let result = timeout(35_000, relay(
-            "127.0.0.1:1".parse().unwrap(), &mut stream, &mut peer,
-            Limiter::new(1_000_000.), "blocked-send-test".to_owned(),
-        )).await.expect("a blocked relay write must finish within its deadline");
+        let result = timeout(
+            35_000,
+            relay(
+                "127.0.0.1:1".parse().unwrap(),
+                &mut stream,
+                &mut peer,
+                Limiter::new(1_000_000.),
+                "blocked-send-test".to_owned(),
+            ),
+        )
+        .await
+        .expect("a blocked relay write must finish within its deadline");
         let error = result.expect_err("the blocked write must fail");
-        assert!(error.downcast_ref::<tokio::time::error::Elapsed>().is_some());
+        assert!(error
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some());
     }
 
     /// Checks that stalled writes time out in either relay direction.
@@ -1609,7 +1638,10 @@ mod message_size_tests {
         BytesCodec::new()
             .encode(Bytes::from(vec![0u8; payload_len]), &mut frame)
             .unwrap();
-        client.write_all(&frame[..frame.len() - payload_len]).await.unwrap();
+        client
+            .write_all(&frame[..frame.len() - payload_len])
+            .await
+            .unwrap();
         let mut byte = [0u8; 1];
         let read = timeout(5_000, client.read(&mut byte))
             .await
@@ -1639,7 +1671,10 @@ mod message_size_tests {
             while client.read(&mut buf).await.unwrap_or(0) > 0 {}
         })
         .await;
-        assert!(closed.is_ok(), "hbbr waited for the payload of an oversized relay request");
+        assert!(
+            closed.is_ok(),
+            "hbbr waited for the payload of an oversized relay request"
+        );
     }
 
     #[hbb_common::tokio::test]
@@ -1690,11 +1725,17 @@ mod waiter_tests {
     #[async_trait]
     impl StreamTrait for TestStream {
         /// Provides the test stream receive behavior.
-        async fn recv(&mut self) -> Option<Result<BytesMut, Error>> { None }
+        async fn recv(&mut self) -> Option<Result<BytesMut, Error>> {
+            None
+        }
         /// Simulates a relay write for the test stream.
-        async fn send_raw(&mut self, _: Bytes) -> ResultType<()> { Ok(()) }
+        async fn send_raw(&mut self, _: Bytes) -> ResultType<()> {
+            Ok(())
+        }
         /// Uses non-WebSocket framing for the test stream.
-        fn is_ws(&self) -> bool { false }
+        fn is_ws(&self) -> bool {
+            false
+        }
         /// Leaves the test stream unchanged when raw mode is requested.
         fn set_raw(&mut self) {}
         fn set_max_packet_length(&mut self, _: usize) {}

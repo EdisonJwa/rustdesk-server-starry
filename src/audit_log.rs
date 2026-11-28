@@ -274,7 +274,10 @@ fn epoch_seconds() -> u64 {
 /// rotation and retention, so the async side only ever queues.
 fn writer_task(config: AuditConfig, mut receiver: mpsc::Receiver<AuditEvent>) {
     if let Err(err) = fs::create_dir_all(&config.dir) {
-        log::error!("Cannot create audit directory {}: {err}", config.dir.display());
+        log::error!(
+            "Cannot create audit directory {}: {err}",
+            config.dir.display()
+        );
         // Drain and count so callers see the drop instead of a silent queue.
         while receiver.blocking_recv().is_some() {
             COUNTERS.dropped.fetch_add(1, Ordering::Relaxed);
@@ -288,7 +291,9 @@ fn writer_task(config: AuditConfig, mut receiver: mpsc::Receiver<AuditEvent>) {
     // bursts and the deadline only bounds rotation checks.
     while let Some(event) = receiver.blocking_recv() {
         let day = event.epoch_seconds / 86_400;
-        let needs_new_day = state.as_ref().is_none_or(|state: &DayState| state.day != day);
+        let needs_new_day = state
+            .as_ref()
+            .is_none_or(|state: &DayState| state.day != day);
         if needs_new_day {
             if let Some(mut state) = state.take() {
                 state.file.flush().ok();
@@ -320,7 +325,11 @@ fn writer_task(config: AuditConfig, mut receiver: mpsc::Receiver<AuditEvent>) {
             continue;
         }
         let line = event.to_jsonl();
-        match state.file.write_all(line.as_bytes()).and_then(|_| state.file.flush()) {
+        match state
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|_| state.file.flush())
+        {
             Ok(()) => {
                 state.written += line.len() as u64;
                 COUNTERS.written.fetch_add(1, Ordering::Relaxed);
@@ -368,7 +377,10 @@ fn prune_expired(dir: &Path, retention_days: u64) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some(stem) = name.strip_prefix("audit-").and_then(|rest| rest.strip_suffix(".jsonl")) else {
+        let Some(stem) = name
+            .strip_prefix("audit-")
+            .and_then(|rest| rest.strip_suffix(".jsonl"))
+        else {
             continue;
         };
         let Some(year) = stem.get(0..4).and_then(|part| part.parse::<i64>().ok()) else {
@@ -597,7 +609,10 @@ mod tests {
         };
         let line = event.to_jsonl();
         assert!(line.contains("\"verdict\":\"deny\""), "{line}");
-        assert!(line.contains("\"reason\":\"strategy_group_denied\""), "{line}");
+        assert!(
+            line.contains("\"reason\":\"strategy_group_denied\""),
+            "{line}"
+        );
         assert!(line.contains("\"group\":\"retired\""), "{line}");
         assert!(
             line.contains("\"mode\":\"enforce\""),

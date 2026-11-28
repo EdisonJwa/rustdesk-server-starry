@@ -17,7 +17,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicU64, Ordering}, Arc, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock, RwLock,
+    },
 };
 
 use serde_derive::Deserialize;
@@ -172,8 +175,9 @@ pub fn reload() -> Result<Option<(u32, String)>, String> {
     let version = strategy.version();
     let digest = strategy.digest().to_owned();
     let slot = RUNTIME.get_or_init(|| RwLock::new(None));
-    *slot.write().map_err(|_| "strategy_state_poisoned".to_owned())? =
-        Some(Arc::new(strategy));
+    *slot
+        .write()
+        .map_err(|_| "strategy_state_poisoned".to_owned())? = Some(Arc::new(strategy));
     RELOADS.fetch_add(1, Ordering::Relaxed);
     Ok(Some((version, digest)))
 }
@@ -272,8 +276,8 @@ fn configured_path() -> Option<PathBuf> {
 fn load_document(path: &Path) -> Result<Strategy, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|err| format!("cannot read strategy file {}: {err}", path.display()))?;
-    let document: StrategyDocument = serde_yml::from_str(&raw)
-        .map_err(|err| format!("cannot parse strategy file: {err}"))?;
+    let document: StrategyDocument =
+        serde_yml::from_str(&raw).map_err(|err| format!("cannot parse strategy file: {err}"))?;
     validate(document, &raw)
 }
 
@@ -313,10 +317,7 @@ fn validate(document: StrategyDocument, raw: &str) -> Result<Strategy, String> {
         }
         if let Some(scope) = &group.require_scope {
             if scope.trim().is_empty() {
-                return Err(format!(
-                    "group {} has an empty require_scope",
-                    group.name
-                ));
+                return Err(format!("group {} has an empty require_scope", group.name));
             }
         }
     }
@@ -334,7 +335,10 @@ fn validate(document: StrategyDocument, raw: &str) -> Result<Strategy, String> {
     let digest = {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(raw.as_bytes());
-        let hex = hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hex = hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         hex[..16].to_owned()
     };
     Ok(Strategy {
@@ -386,7 +390,9 @@ mod tests {
 
     #[test]
     fn disabled_engine_gives_general_with_no_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Clear both the env var and the runtime slot: another test may have
         // installed a document, and the slot outlives an env change.
         std::env::remove_var("STARRY_STRATEGY_FILE");
@@ -405,16 +411,20 @@ mod tests {
              - name: exact-hit\n    ids: [\"tmp-special-1\"]\n    deny: true\n",
         );
         assert_eq!(
-            strategy.group_index("tmp-1").map(|index| strategy.groups[index].name.as_str()),
+            strategy
+                .group_index("tmp-1")
+                .map(|index| strategy.groups[index].name.as_str()),
             Some("contractor")
         );
         assert_eq!(
-            strategy.group_index("tmp-special-1")
+            strategy
+                .group_index("tmp-special-1")
                 .map(|index| strategy.groups[index].name.as_str()),
             Some("exact-hit")
         );
         assert_eq!(
-            strategy.group_index("tmp-special-9")
+            strategy
+                .group_index("tmp-special-9")
                 .map(|index| strategy.groups[index].name.as_str()),
             Some("contractor-long")
         );
@@ -476,7 +486,9 @@ mod tests {
         let path = directory.path().join("strategy.yaml");
         std::fs::write(&path, yaml).unwrap();
         std::env::set_var("STARRY_STRATEGY_FILE", &path);
-        reload().expect("install the strategy").expect("engine enabled");
+        reload()
+            .expect("install the strategy")
+            .expect("engine enabled");
         directory
     }
 
@@ -490,7 +502,9 @@ mod tests {
     /// deny-by-default document into an allow-all.
     #[test]
     fn default_group_deny_applies_to_unmatched_devices() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _directory = install(
             r#"version: 1
 default_group: locked
@@ -520,7 +534,9 @@ groups:
 
     #[test]
     fn default_group_require_scope_applies_to_unmatched_devices() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _directory = install(
             r#"version: 1
 default_group: guarded
@@ -546,11 +562,12 @@ groups:
     /// A managed deployment must not start with a policy that failed to load.
     #[test]
     fn required_policy_fails_closed_when_the_document_is_broken() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("strategy.yaml");
-        std::fs::write(&path, "version: 1\ndefault_group: general\ngroups:\n")
-            .unwrap();
+        std::fs::write(&path, "version: 1\ndefault_group: general\ngroups:\n").unwrap();
         std::env::set_var("STARRY_STRATEGY_FILE", &path);
         std::env::set_var("STARRY_STRATEGY_REQUIRED", "1");
         let outcome = startup();
@@ -566,7 +583,9 @@ groups:
     /// A required policy that was never configured is equally fatal.
     #[test]
     fn required_policy_fails_closed_when_unconfigured() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::remove_var("STARRY_STRATEGY_FILE");
         std::env::set_var("STARRY_STRATEGY_REQUIRED", "1");
         let outcome = startup();
@@ -581,11 +600,16 @@ groups:
     /// Compatibility deployments keep the old behaviour: log and continue.
     #[test]
     fn optional_policy_tolerates_a_broken_document() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("strategy.yaml");
-        std::fs::write(&path, "version: 9\ndefault_group: general\ngroups:\n  - name: general\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "version: 9\ndefault_group: general\ngroups:\n  - name: general\n",
+        )
+        .unwrap();
         std::env::set_var("STARRY_STRATEGY_FILE", &path);
         std::env::remove_var("STARRY_STRATEGY_REQUIRED");
         let outcome = startup();
@@ -595,6 +619,9 @@ groups:
             "the load error must still be reported to the caller"
         );
         uninstall();
-        assert!(!is_enabled(), "a rejected document must not install a policy");
+        assert!(
+            !is_enabled(),
+            "a rejected document must not install a policy"
+        );
     }
 }

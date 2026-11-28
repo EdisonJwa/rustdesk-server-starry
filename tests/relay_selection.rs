@@ -94,7 +94,9 @@ fn reserve_relay_port(hbbs_port: u16) -> u16 {
 
 #[test]
 fn a_blank_client_relay_is_filled_with_a_reachable_server_choice() {
-    let _guard = GATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = GATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     sodiumoxide::init().unwrap();
     let hbbs_port = reserve_hbbs_ports();
     let relay_port = reserve_relay_port(hbbs_port);
@@ -162,7 +164,10 @@ fn a_blank_client_relay_is_filled_with_a_reachable_server_choice() {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let _guard = Guard { children: vec![relay, hbbs], directory };
+    let _guard = Guard {
+        children: vec![relay, hbbs],
+        directory,
+    };
 
     Builder::new_current_thread()
         .enable_all()
@@ -267,4 +272,3 @@ async fn register_peer(port: u16, id: &str) -> FramedSocket {
     ));
     socket
 }
-

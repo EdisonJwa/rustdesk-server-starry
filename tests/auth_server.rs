@@ -122,7 +122,10 @@ fn start_api(tag: &str) -> Api {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let guard = ChildGuard { child, directory: directory.clone() };
+    let guard = ChildGuard {
+        child,
+        directory: directory.clone(),
+    };
     let api = Api {
         base: format!("http://127.0.0.1:{port}"),
         directory,
@@ -218,7 +221,9 @@ fn now_seconds() -> u64 {
 
 #[test]
 fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
-    let _guard = GATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = GATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let api = start_api("contract");
 
     // login-options: the client decodes a JSON array of provider strings.
@@ -240,8 +245,14 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     assert_eq!(body["user"]["name"], "admin");
     assert_eq!(body["user"]["status"], 1);
     assert_eq!(body["user"]["is_admin"], true);
-    assert!(body["user"]["info"].is_object(), "Rust client requires user.info");
-    assert!(body.get("user_info").is_none(), "the client reads `user`, not `user_info`");
+    assert!(
+        body["user"]["info"].is_object(),
+        "Rust client requires user.info"
+    );
+    assert!(
+        body.get("user_info").is_none(),
+        "the client reads `user`, not `user_info`"
+    );
 
     // JWT header must be the EdDSA/at+jwt/kid shape hbbs requires.
     let segments: Vec<&str> = token.split('.').collect();
@@ -310,11 +321,7 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     assert_eq!(user["name"], "admin");
     assert_eq!(user["is_admin"], true);
 
-    let (status, _) = http_post_bearer(
-        &format!("{}/api/currentUser", api.base),
-        &json!({}),
-        None,
-    );
+    let (status, _) = http_post_bearer(&format!("{}/api/currentUser", api.base), &json!({}), None);
     assert_eq!(status, 401);
 
     // A short-lived connection token is minted for tooling and verifies with
@@ -328,7 +335,8 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     let connection: Value = serde_json::from_str(&body).unwrap();
     let connection_token = connection["token"].as_str().unwrap();
     let connection_claims: Value =
-        serde_json::from_slice(&decode_segment(connection_token.split('.').nth(1).unwrap())).unwrap();
+        serde_json::from_slice(&decode_segment(connection_token.split('.').nth(1).unwrap()))
+            .unwrap();
     let connection_exp = connection_claims["exp"].as_u64().unwrap();
     assert!(connection_exp > now_seconds());
     assert!(connection_exp <= now_seconds() + 3_660);
@@ -354,7 +362,10 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     assert_eq!(status, 200);
     assert_eq!(body.trim(), "null");
     let (status, _) = http_get(&format!("{}/api/ab", api.base)).unwrap();
-    assert_eq!(status, 401, "an unauthenticated pull must not look like an empty book");
+    assert_eq!(
+        status, 401,
+        "an unauthenticated pull must not look like an empty book"
+    );
 
     // A push is answered with null and the exact document comes back verbatim:
     // the client owns this shape, so any server-side rewrite corrupts it.
@@ -391,7 +402,10 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
     assert_eq!(status, 400);
     let (_, body) = http_get_with_bearer(&format!("{}/api/ab", api.base), &token_for_ab);
     let still: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(still["data"], document, "a rejected push must not clobber the book");
+    assert_eq!(
+        still["data"], document,
+        "a rejected push must not clobber the book"
+    );
 
     // Unknown endpoints answer JSON so clients never choke on HTML.
     let (status, body) = http_get(&format!("{}/api/nope", api.base)).unwrap();
@@ -401,7 +415,9 @@ fn login_contract_matches_the_official_client_and_publishes_a_usable_jwks() {
 
 #[test]
 fn hbbs_enforce_accepts_api_minted_tokens_end_to_end() {
-    let _guard = GATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = GATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     sodiumoxide::init().unwrap();
     let api = start_api("enforce");
     let token = login_token(&api);
@@ -497,11 +513,13 @@ async fn punch(port: u16, token: &str) -> RendezvousMessage {
 
 fn punch_message(token: &str) -> RendezvousMessage {
     RendezvousMessage {
-        union: Some(rendezvous_message::Union::PunchHoleRequest(PunchHoleRequest {
-            id: "some-target-id".to_owned(),
-            token: token.to_owned(),
-            ..Default::default()
-        })),
+        union: Some(rendezvous_message::Union::PunchHoleRequest(
+            PunchHoleRequest {
+                id: "some-target-id".to_owned(),
+                token: token.to_owned(),
+                ..Default::default()
+            },
+        )),
         ..Default::default()
     }
 }

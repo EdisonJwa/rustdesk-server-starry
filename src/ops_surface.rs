@@ -41,10 +41,7 @@ use hbb_common::{
         time::timeout,
     },
 };
-use std::{
-    net::SocketAddr,
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use crate::relay_server::{
     admission_decision, ops_snapshot, Admission, AdmissionBlock, OpsSnapshot,
@@ -72,11 +69,9 @@ pub(crate) fn configured_listen() -> Result<Option<SocketAddr>, String> {
         .parse()
         .map_err(|_| "STARRY_RELAY_OPS_LISTEN must be ip:port".to_owned())?;
     if !address.ip().is_loopback() && !allow_public() {
-        return Err(
-            "STARRY_RELAY_OPS_LISTEN must be a loopback address unless \
+        return Err("STARRY_RELAY_OPS_LISTEN must be a loopback address unless \
              STARRY_RELAY_OPS_ALLOW_PUBLIC=1"
-                .to_owned(),
-        );
+            .to_owned());
     }
     Ok(Some(address))
 }
@@ -491,7 +486,10 @@ mod tests {
         let ready = ProbeView::for_test(2, 4, false);
         let (status, body) = render_ready(&ready);
         assert_eq!(status, "200 OK");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"], "ready");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+            "ready"
+        );
 
         let full = ProbeView::for_test(4, 4, false);
         let (status, body) = render_ready(&full);
