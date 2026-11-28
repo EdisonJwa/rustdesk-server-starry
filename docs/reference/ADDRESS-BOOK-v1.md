@@ -63,6 +63,30 @@ A push is validated as JSON before it is stored. That is not schema validation: 
 only ensures a corrupt push cannot make every later pull unparseable. A rejected
 push leaves the previous document intact.
 
+## Relationship to the structured shape
+
+Both shapes are implemented, and the client decides which one it uses **on every
+start** (`legacyMode.value = _personalAbGuid == null` in
+`flutter/lib/models/ab_model.dart`). A `200` from `/api/ab/personal` is what
+switches it, so the moment that endpoint exists the client stops reading
+`/api/ab`.
+
+That has a consequence worth stating plainly: **a deployment that already holds
+legacy books must import them, or the upgrade looks like data loss.** The data is
+still stored, but nothing reads it any more.
+
+The import is therefore part of `POST /api/ab/personal`, runs once per account,
+and records itself in `ab_legacy_imports` so "did this happen" is answerable.
+The legacy row is kept rather than deleted: it is the rollback path.
+
+It is a one-time import, not a read-time merge. Two divergent copies feeding each
+other would have no authority to say which side wins, and the legacy document's
+shape converts losslessly, so a merge would buy nothing.
+
+Gates: `tests/api_endpoints.rs::a_legacy_book_survives_the_switch_to_structured_mode`
+fails first with `{"data":[],"total":0}` when the import is disabled, and asserts
+the peer, its tags, and the CSS colour converted to the client's ARGB integer.
+
 ## What this deliberately does not do
 
 - **No sharing, no groups, no roles.** v1 is one book per account. The client's
