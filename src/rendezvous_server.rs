@@ -1,19 +1,18 @@
 use crate::common::*;
-use crate::{allocation_explain, connection_auth, fast_relay, geo_relay, local_control, profile_activation, relay_observer, relay_quality, secure_tcp, starry_config, webrtc_signal, websocket_signal};
 use crate::peer::*;
+use crate::{
+    allocation_explain, connection_auth, fast_relay, geo_relay, local_control, profile_activation,
+    relay_observer, relay_quality, secure_tcp, starry_config, webrtc_signal, websocket_signal,
+};
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
     config,
     futures::future::join_all,
-    futures_util::{
-        stream::StreamExt,
-    },
+    futures_util::stream::StreamExt,
     log,
     protobuf::{Message as _, MessageField},
-    rendezvous_proto::{
-        *,
-    },
+    rendezvous_proto::*,
     tcp::FramedStream,
     timeout,
     tokio::{
@@ -64,6 +63,85 @@ type Receiver = mpsc::UnboundedReceiver<Data>;
 static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
+
+/// Picks one relay out of a rule's candidates using the client's address.
+///
+/// A GEO rule lists several relays for one country in a preference order, and
+/// taking the first entry leaves the rest idle until the first one fails — the
+/// pool behaves as hot standby rather than as capacity. This spreads the clients
+/// of a rule across its candidates while keeping two properties that matter:
+///
+/// * **stable**: the same client address always picks the same relay, so a
+///   client does not jump between relays between connections, which would look
+///   like flapping in relay telemetry and lose any connection reuse;
+/// * **order-respecting**: the choice is a hash into the candidate list, so the
+///   configured order still decides which relays are considered at all. The
+///   health probe, not this function, is what removes a dead one.
+///
+/// Deliberately not load- or latency-aware. The client never reports either for
+/// a relay it has not connected to, and an hbbs-side measurement would reflect
+/// the hub's position rather than the client's — see
+/// docs/reference/RELAY-SELECTION-FEASIBILITY.md.
+///
+/// `STARRY_RELAY_PIN_TO_FIRST=1` restores the previous first-only behaviour,
+/// which is the sane thing to reach for if a deployment's exit addresses are
+/// concentrated behind one NAT and the hash pins a whole site onto one relay.
+fn pick_within(candidates: Vec<String>, client: IpAddr) -> String {
+    pick_within_pinned(candidates, client, pin_to_first())
+}
+
+/// Whether a deployment asked for the previous first-only behaviour.
+fn pin_to_first() -> bool {
+    std::env::var("STARRY_RELAY_PIN_TO_FIRST")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// The decision with the deployment flag passed in.
+///
+/// Split out so the tests can exercise both behaviours without mutating the
+/// process environment: an environment variable set by one test races every
+/// other test in the same binary, which made the stability test flaky the first
+/// time it ran.
+fn pick_within_pinned(candidates: Vec<String>, client: IpAddr, pin_first: bool) -> String {
+    if pin_first || candidates.len() <= 1 {
+        return candidates.into_iter().next().unwrap_or_default();
+    }
+    let index = client_hash(client) % candidates.len() as u64;
+    candidates
+        .into_iter()
+        .nth(index as usize)
+        .unwrap_or_default()
+}
+
+/// A stable hash of the client address.
+///
+/// FNV-1a rather than `DefaultHasher`: the latter is explicitly allowed to change
+/// between releases, and a map that reshuffles every deployment would move every
+/// client at once. Only the address is hashed — not the port, which changes on
+/// every connection, and not the peer, so both ends of a pair land on the same
+/// relay and the pair can share it.
+fn client_hash(client: IpAddr) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in client_bytes(client) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// The address bytes that identify a client: IPv4 in full, IPv6 by prefix.
+///
+/// IPv6 clients are commonly handed a whole /64, and the interface identifier
+/// changes per connection, so hashing all sixteen bytes would look random.
+fn client_bytes(client: IpAddr) -> Vec<u8> {
+    match client {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets()[..8].to_vec(),
+    }
+}
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 const MAX_RELAY_UUID_LEN: usize = 128;
 
@@ -125,8 +203,7 @@ const MAX_MESSAGE_KB_CAP: usize = 64 << 10;
 const WS_DEFAULT_MAX_FRAME_SIZE: usize = 16 << 20;
 // Every connection pays its read buffer up front, and tungstenite's default is 128 KiB.
 const WS_BUFFER_SIZE: usize = 8 << 10;
-static MAX_MESSAGE: Lazy<usize> =
-    Lazy::new(|| max_message_kb(&get_arg("MAX_MESSAGE_KB")) << 10);
+static MAX_MESSAGE: Lazy<usize> = Lazy::new(|| max_message_kb(&get_arg("MAX_MESSAGE_KB")) << 10);
 
 fn max_message_kb(arg: &str) -> usize {
     match arg.parse::<usize>() {
@@ -139,26 +216,44 @@ fn max_message_kb(arg: &str) -> usize {
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex as TokioMutex; // differentiate if needed
 #[derive(Clone)]
-struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
-static PUNCH_REQS: Lazy<TokioMutex<VecDeque<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(VecDeque::new()));
+struct PunchReqEntry {
+    tm: Instant,
+    from_ip: String,
+    to_ip: String,
+    to_id: String,
+}
+static PUNCH_REQS: Lazy<TokioMutex<VecDeque<PunchReqEntry>>> =
+    Lazy::new(|| TokioMutex::new(VecDeque::new()));
 const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
 static PUNCH_REQ_MAX: Lazy<usize> =
     Lazy::new(|| get_arg("MAX_PUNCH_REQUESTS").parse().unwrap_or(100_000));
 
 async fn record_punch_req(from_ip: String, to_ip: String, to_id: String) {
     let max = *PUNCH_REQ_MAX;
-    if max == 0 { return; }
+    if max == 0 {
+        return;
+    }
     let mut lock = PUNCH_REQS.lock().await;
     let mut dup = false;
-    for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
+    for e in lock.iter().rev().take(30) {
+        // only check recent tail subset for speed
         if e.from_ip == from_ip && e.to_id == to_id {
-            if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
+            if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                dup = true;
+            }
             break;
         }
     }
     if !dup {
-        if lock.len() >= max { lock.pop_front(); }
-        lock.push_back(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id });
+        if lock.len() >= max {
+            lock.pop_front();
+        }
+        lock.push_back(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip,
+            to_ip,
+            to_id,
+        });
     }
 }
 
@@ -372,7 +467,11 @@ impl RendezvousServer {
         let webrtc_enabled = webrtc_signal::configure_from_args();
         log::info!(
             "WebRTC signalling: {}",
-            if webrtc_enabled { "enabled" } else { "disabled" }
+            if webrtc_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
         if get_arg("ALWAYS_USE_RELAY").to_uppercase() == "Y" {
             ALWAYS_USE_RELAY.store(true, Ordering::SeqCst);
@@ -464,8 +563,7 @@ impl RendezvousServer {
     ) -> LoopFailure {
         let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
         let mut relay_quality_deadline_tick = interval(Duration::from_millis(100));
-        relay_quality_deadline_tick
-            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        relay_quality_deadline_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = relay_quality_deadline_tick.tick() => {
@@ -659,8 +757,7 @@ impl RendezvousServer {
                     }
                 }
                 Some(rendezvous_message::Union::RegisterPk(rk)) => {
-                    if let Some(mut outcome) =
-                        self.process_register_pk(rk, addr, Some(addr)).await
+                    if let Some(mut outcome) = self.process_register_pk(rk, addr, Some(addr)).await
                     {
                         let mut activation_epoch = 0;
                         let mut activation_id = Bytes::new();
@@ -962,8 +1059,7 @@ impl RendezvousServer {
                     if peer.socket_addr == expected_addr
                         && peer.route_generation == claim.generation()
                     {
-                        peer.socket_addr =
-                            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+                        peer.socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
                         peer.route_generation = 0;
                         peer.last_reg_time = get_expired_time();
                         true
@@ -978,12 +1074,9 @@ impl RendezvousServer {
                 generation,
                 connection_id,
             } => {
-                let removed = websocket_signal::remove_profile_route(
-                    &peer_id,
-                    generation,
-                    connection_id,
-                )
-                .await;
+                let removed =
+                    websocket_signal::remove_profile_route(&peer_id, generation, connection_id)
+                        .await;
                 if removed {
                     if let Some(peer) = self.pm.get_in_memory(&peer_id).await {
                         let mut peer = peer.write().await;
@@ -999,12 +1092,7 @@ impl RendezvousServer {
         claim.commit(route_removed).await
     }
 
-    async fn activate_native_route(
-        &self,
-        peer_id: &str,
-        addr: SocketAddr,
-        route_generation: u64,
-    ) {
+    async fn activate_native_route(&self, peer_id: &str, addr: SocketAddr, route_generation: u64) {
         if let Some(peer) = self.pm.get_in_memory(peer_id).await {
             let mut peer = peer.write().await;
             peer.socket_addr = addr;
@@ -1173,19 +1261,21 @@ impl RendezvousServer {
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
                     }
-                    allow_err!(self.handle_tcp_punch_hole_request(route_addr, effective_addr, ph, key, ws).await);
+                    allow_err!(
+                        self.handle_tcp_punch_hole_request(route_addr, effective_addr, ph, key, ws)
+                            .await
+                    );
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayQualityStageReport(report)) => {
                     if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(route_addr), sink);
+                        self.tcp_punch
+                            .lock()
+                            .await
+                            .insert(try_into_v4(route_addr), sink);
                     }
                     if let relay_quality::StageReportResolution::Dispatch(dispatch) =
-                        relay_quality::handle_stage_report(
-                            route_addr,
-                            effective_addr.ip(),
-                            report,
-                        )
+                        relay_quality::handle_stage_report(route_addr, effective_addr.ip(), report)
                     {
                         self.dispatch_relay_quality(dispatch).await;
                     }
@@ -1193,13 +1283,14 @@ impl RendezvousServer {
                 }
                 Some(rendezvous_message::Union::RelayQualityCancel(cancel)) => {
                     if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(route_addr), sink);
+                        self.tcp_punch
+                            .lock()
+                            .await
+                            .insert(try_into_v4(route_addr), sink);
                     }
-                    if let Some(dispatch) = relay_quality::cancel_allocation(
-                        route_addr,
-                        effective_addr.ip(),
-                        cancel,
-                    ) {
+                    if let Some(dispatch) =
+                        relay_quality::cancel_allocation(route_addr, effective_addr.ip(), cancel)
+                    {
                         self.dispatch_relay_quality(dispatch).await;
                     }
                     return true;
@@ -1283,24 +1374,21 @@ impl RendezvousServer {
                         None
                     };
                     let server_selected_relay = target.as_ref().map(|(_, target_ip)| {
-                        self.get_relay_server(
-                            effective_addr.ip(),
-                            *target_ip,
-                            requirement,
-                        )
+                        self.get_relay_server(effective_addr.ip(), *target_ip, requirement)
                     });
-                    let quality_resolution = if let Some((_target_route, target_ip)) = target.as_ref() {
-                        relay_quality::select_for_request(
-                            route_addr,
-                            effective_addr.ip(),
-                            *target_ip,
-                            &rf.uuid,
-                            rf.relay_quality_allocation_id.as_ref(),
-                            rf.relay_quality_report.clone().into_option(),
-                        )
-                    } else {
-                        relay_quality::RequestResolution::Legacy
-                    };
+                    let quality_resolution =
+                        if let Some((_target_route, target_ip)) = target.as_ref() {
+                            relay_quality::select_for_request(
+                                route_addr,
+                                effective_addr.ip(),
+                                *target_ip,
+                                &rf.uuid,
+                                rf.relay_quality_allocation_id.as_ref(),
+                                rf.relay_quality_report.clone().into_option(),
+                            )
+                        } else {
+                            relay_quality::RequestResolution::Legacy
+                        };
                     let quality_selection = match quality_resolution {
                         relay_quality::RequestResolution::Legacy => None,
                         relay_quality::RequestResolution::Selected(selection) => {
@@ -1331,8 +1419,7 @@ impl RendezvousServer {
                             }
                         }
                     }
-                    let fast_media_endpoint =
-                        relay_observer::fast_media_endpoint(&rf.relay_server);
+                    let fast_media_endpoint = relay_observer::fast_media_endpoint(&rf.relay_server);
                     rf.fast_relay_authorization = target
                         .as_ref()
                         .and_then(|(_, target_ip)| {
@@ -1414,20 +1501,16 @@ impl RendezvousServer {
                         rr.relay_quality_decision = MessageField::some(quality_decision);
                     }
                     if let Some(server_selected_relay) =
-                        fast_relay::selected_relay_for_response(
-                            &rr.uuid,
-                            effective_addr.ip(),
-                        )
+                        fast_relay::selected_relay_for_response(&rr.uuid, effective_addr.ip())
                     {
                         rr.relay_server = server_selected_relay;
                     }
-                    rr.fast_relay_authorization =
-                        fast_relay::authorization_for_response(
-                            &rr.uuid,
-                            effective_addr.ip(),
-                            &rr.relay_server,
-                        )
-                        .unwrap_or_default();
+                    rr.fast_relay_authorization = fast_relay::authorization_for_response(
+                        &rr.uuid,
+                        effective_addr.ip(),
+                        &rr.relay_server,
+                    )
+                    .unwrap_or_default();
                     msg_out.set_relay_response(rr);
                     allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
                 }
@@ -1702,11 +1785,8 @@ impl RendezvousServer {
             let mut msg_out = RendezvousMessage::new();
             let peer_is_lan = self.is_lan(peer_effective_addr);
             let is_lan = self.is_lan(effective_addr);
-            let mut relay_server = self.get_relay_server(
-                effective_addr.ip(),
-                peer_effective_addr.ip(),
-                requirement,
-            );
+            let mut relay_server =
+                self.get_relay_server(effective_addr.ip(), peer_effective_addr.ip(), requirement);
             let force_websocket_relay =
                 requirement != websocket_signal::RelayRequirement::NativeOnly;
             if force_websocket_relay && relay_server.is_empty() {
@@ -1754,13 +1834,14 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
-                    relay_quality_offer: MessageField::from_option(
-                        relay_quality_offer.clone(),
-                    ),
+                    relay_quality_offer: MessageField::from_option(relay_quality_offer.clone()),
                     ..Default::default()
                 });
             } else {
-                log::debug!("Dispatching PunchHole with Relay requirement {:?}", requirement);
+                log::debug!(
+                    "Dispatching PunchHole with Relay requirement {:?}",
+                    requirement
+                );
                 // An admitted offer opens the route that keeps this controller
                 // connection for trickle ICE; a full route table drops the offer.
                 let webrtc_sdp_offer = if !ph.webrtc_sdp_offer.is_empty()
@@ -1768,8 +1849,7 @@ impl RendezvousServer {
                         try_into_v4(route_addr),
                         try_into_v4(effective_addr).ip(),
                         &id,
-                    )
-                {
+                    ) {
                     std::mem::take(&mut ph.webrtc_sdp_offer)
                 } else {
                     String::new()
@@ -1783,9 +1863,7 @@ impl RendezvousServer {
                     relay_server,
                     webrtc_sdp_offer,
                     force_relay,
-                    relay_quality_offer: MessageField::from_option(
-                        relay_quality_offer,
-                    ),
+                    relay_quality_offer: MessageField::from_option(relay_quality_offer),
                     ..Default::default()
                 });
             }
@@ -1829,9 +1907,7 @@ impl RendezvousServer {
         Ok(())
     }
 
-    fn relay_quality_message(
-        payload: relay_quality::DispatchPayload,
-    ) -> RendezvousMessage {
+    fn relay_quality_message(payload: relay_quality::DispatchPayload) -> RendezvousMessage {
         let mut message = RendezvousMessage::new();
         match payload {
             relay_quality::DispatchPayload::Offer(offer) => {
@@ -1847,19 +1923,21 @@ impl RendezvousServer {
         message
     }
 
-    async fn dispatch_relay_quality(
-        &mut self,
-        dispatch: relay_quality::StageDispatch,
-    ) {
+    async fn dispatch_relay_quality(&mut self, dispatch: relay_quality::StageDispatch) {
         let controller = Self::relay_quality_message(dispatch.controller);
-        allow_err!(self.send_to_tcp_sync(controller, dispatch.controller_route).await);
+        allow_err!(
+            self.send_to_tcp_sync(controller, dispatch.controller_route)
+                .await
+        );
         let target = Self::relay_quality_message(dispatch.target);
         if dispatch.target_websocket {
             if !websocket_signal::send_to_peer(&dispatch.target_id, &target).await {
                 log::warn!("Relay Quality stage delivery failed for current WebSocket route");
             }
         } else {
-            self.tx.send(Data::Msg(target.into(), dispatch.target_route)).ok();
+            self.tx
+                .send(Data::Msg(target.into(), dispatch.target_route))
+                .ok();
         }
     }
 
@@ -1867,14 +1945,21 @@ impl RendezvousServer {
     /// connection for the rest of the trickle-ICE exchange.
     async fn send_to_routed_controller(&mut self, msg: RendezvousMessage, controller: SocketAddr) {
         let mut sink = self.tcp_punch.lock().await.remove(&controller);
-        if timeout(5_000, Self::send_to_sink(&mut sink, msg)).await.is_err() {
+        if timeout(5_000, Self::send_to_sink(&mut sink, msg))
+            .await
+            .is_err()
+        {
             log::debug!("WebRTC controller {controller:?} write timed out");
             webrtc_signal::close_route(controller);
             return;
         }
         if let Some(sink) = sink {
             if webrtc_signal::has_route(controller) {
-                self.tcp_punch.lock().await.entry(controller).or_insert(sink);
+                self.tcp_punch
+                    .lock()
+                    .await
+                    .entry(controller)
+                    .or_insert(sink);
             }
         }
     }
@@ -2058,10 +2143,7 @@ impl RendezvousServer {
                 Ok(_) => {}
                 Err(err) => failures.push(format!("Geo rollback failed: {err}")),
             }
-            match websocket_signal::prepare(
-                &config.websocket_signal,
-                config.relay_quality.enabled,
-            )
+            match websocket_signal::prepare(&config.websocket_signal, config.relay_quality.enabled)
                 .and_then(websocket_signal::activate_prepared)
             {
                 Ok(_) => {}
@@ -2078,11 +2160,8 @@ impl RendezvousServer {
             }
         }
         let previous_auth = previous.map(|config| &config.connection_auth);
-        let auth = connection_auth::restore(
-            previous_auth,
-            connection_auth::must_login_floor(),
-        )
-        .await;
+        let auth =
+            connection_auth::restore(previous_auth, connection_auth::must_login_floor()).await;
         if auth.contains("failed") {
             failures.push(auth);
         }
@@ -2113,12 +2192,18 @@ impl RendezvousServer {
         let eligible = snapshot.eligible_relays(requirement);
         if eligible.is_empty() {
             if requirement != websocket_signal::RelayRequirement::NativeOnly {
-                log::warn!("No eligible WebSocket Relay for requirement {:?}", requirement);
+                log::warn!(
+                    "No eligible WebSocket Relay for requirement {:?}",
+                    requirement
+                );
             }
             return "".to_owned();
         }
         if let Some(selection) = snapshot.select_geo(pa, pb, &eligible, requirement) {
-            return selection.relay;
+            // A GEO rule names several relays for one country, but taking its
+            // first entry leaves the rest idle until a failure. Spread the
+            // clients of that rule across its candidates instead.
+            return pick_within(selection.candidates, pa);
         }
         if eligible.len() == 1 {
             return eligible[0].clone();
@@ -2135,7 +2220,9 @@ impl RendezvousServer {
     ) -> Result<allocation_explain::AllocationTrace, String> {
         let snapshot = relay_observer::snapshot();
         if !snapshot.is_consistent() {
-            return Err("Relay pool and active configuration generations are not synchronized".to_owned());
+            return Err(
+                "Relay pool and active configuration generations are not synchronized".to_owned(),
+            );
         }
         let configured = snapshot.configured_relays();
         let eligible = snapshot.eligible_relays(requirement);
@@ -2160,8 +2247,8 @@ impl RendezvousServer {
     }
 
     async fn reload_starry_runtime(&self) -> Result<starry_config::ActivationAck, String> {
-        let candidate = starry_config::load_candidate()
-            .map_err(|diagnostics| diagnostics.summary())?;
+        let candidate =
+            starry_config::load_candidate().map_err(|diagnostics| diagnostics.summary())?;
         let plan = starry_config::plan_activation(&candidate)
             .map_err(|diagnostics| diagnostics.summary())?;
         let previous = starry_config::snapshot();
@@ -2311,7 +2398,10 @@ impl RendezvousServer {
             }
             "peer.verify" => {
                 let peer_id = request.params.get("id").and_then(serde_json::Value::as_str);
-                let uuid = request.params.get("uuid").and_then(serde_json::Value::as_str);
+                let uuid = request
+                    .params
+                    .get("uuid")
+                    .and_then(serde_json::Value::as_str);
                 let activation_epoch = request
                     .params
                     .get("activation_epoch")
@@ -2385,12 +2475,9 @@ impl RendezvousServer {
                         false,
                     ),
                 },
-                Err(err) => local_control::Response::error(
-                    request_id,
-                    err.code,
-                    err.detail,
-                    err.retryable,
-                ),
+                Err(err) => {
+                    local_control::Response::error(request_id, err.code, err.detail, err.retryable)
+                }
             },
             "config.runtime_state" if empty_params => {
                 match serde_json::to_value(starry_config::runtime_state()) {
@@ -2416,12 +2503,9 @@ impl RendezvousServer {
                     request_id,
                     serde_json::json!({"ok": true, "enabled": false}),
                 ),
-                Err(err) => local_control::Response::error(
-                    request_id,
-                    "STRATEGY_INVALID",
-                    err,
-                    false,
-                ),
+                Err(err) => {
+                    local_control::Response::error(request_id, "STRATEGY_INVALID", err, false)
+                }
             },
             "runtime.reload" if empty_params => match self.reload_starry_runtime().await {
                 Ok(ack) => match serde_json::to_value(ack) {
@@ -2433,15 +2517,17 @@ impl RendezvousServer {
                         false,
                     ),
                 },
-                Err(err) => local_control::Response::error(
-                    request_id,
-                    "CONFIG_INVALID",
-                    err,
-                    false,
-                ),
+                Err(err) => {
+                    local_control::Response::error(request_id, "CONFIG_INVALID", err, false)
+                }
             },
-            "capabilities" | "status" | "relays" | "config.runtime_state"
-            | "runtime.reload" | "strategy.status" | "strategy.reload" => local_control::Response::error(
+            "capabilities"
+            | "status"
+            | "relays"
+            | "config.runtime_state"
+            | "runtime.reload"
+            | "strategy.status"
+            | "strategy.reload" => local_control::Response::error(
                 request_id,
                 "REQUEST_INVALID",
                 "this local control method does not accept parameters",
@@ -2478,8 +2564,9 @@ impl RendezvousServer {
             }
             Some("reload-starry-config" | "rsc") => {
                 res = match self.reload_starry_runtime().await {
-                    Ok(ack) => serde_json::to_string_pretty(&ack)
-                        .unwrap_or_else(|_| "runtime activation acknowledgement serialization failed".to_owned()),
+                    Ok(ack) => serde_json::to_string_pretty(&ack).unwrap_or_else(|_| {
+                        "runtime activation acknowledgement serialization failed".to_owned()
+                    }),
                     Err(err) => format!("runtime reload rejected: {err}"),
                 };
             }
@@ -2588,17 +2675,27 @@ impl RendezvousServer {
                 use std::fmt::Write as _;
                 let mut lock = PUNCH_REQS.lock().await;
                 let arg = fds.next();
-                if let Some("-") = arg { lock.clear(); }
-                else {
+                if let Some("-") = arg {
+                    lock.clear();
+                } else {
                     let mut start = arg.and_then(|x| x.parse::<usize>().ok()).unwrap_or(0);
-                    let mut page_size = fds.next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(10);
-                    if page_size == 0 { page_size = 10; }
+                    let mut page_size = fds
+                        .next()
+                        .and_then(|x| x.parse::<usize>().ok())
+                        .unwrap_or(10);
+                    if page_size == 0 {
+                        page_size = 10;
+                    }
                     for (_, e) in lock.iter().enumerate().skip(start).take(page_size) {
                         let age = e.tm.elapsed();
                         let event_system = std::time::SystemTime::now() - age;
                         let event_iso = chrono::DateTime::<chrono::Utc>::from(event_system)
                             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                        let _ = writeln!(res, "{} {} -> {}@{}", event_iso, e.from_ip, e.to_id, e.to_ip);
+                        let _ = writeln!(
+                            res,
+                            "{} {} -> {}@{}",
+                            event_iso, e.from_ip, e.to_id, e.to_ip
+                        );
                     }
                 }
             }
@@ -2627,11 +2724,15 @@ impl RendezvousServer {
                             Some(requirement) => {
                                 res = match self.explain_relay_server(a, b, requirement) {
                                     Ok(trace) => serde_json::to_string_pretty(&trace)
-                                        .unwrap_or_else(|_| "allocation trace serialization failed".to_owned()),
+                                        .unwrap_or_else(|_| {
+                                            "allocation trace serialization failed".to_owned()
+                                        }),
                                     Err(err) => format!("allocation simulation unavailable: {err}"),
                                 };
                             }
-                            None => res = "invalid transport; expected native, wss, or mixed".to_owned(),
+                            None => {
+                                res = "invalid transport; expected native, wss, or mixed".to_owned()
+                            }
                         }
                     }
                 }
@@ -2659,7 +2760,9 @@ impl RendezvousServer {
                                 false,
                             ),
                         };
-                        if let Err(err) = local_control::write_response(&mut stream, &response).await {
+                        if let Err(err) =
+                            local_control::write_response(&mut stream, &response).await
+                        {
                             log::debug!("Structured local control response failed: {}", err.detail);
                         }
                     }
@@ -2704,7 +2807,10 @@ impl RendezvousServer {
                         // drops the session. See `rendezvous_extras`.
                         Some(rendezvous_message::Union::Hc(_)) => {
                             let reply = crate::rendezvous_extras::health_check_reply();
-                            stream.send_bytes(hbb_common::bytes::Bytes::from(reply)).await.ok();
+                            stream
+                                .send_bytes(hbb_common::bytes::Bytes::from(reply))
+                                .await
+                                .ok();
                         }
                         // A client that can reach only hbbs ports may still need
                         // the API. The reply is built by `rendezvous_extras`,
@@ -2763,8 +2869,8 @@ impl RendezvousServer {
         let effective_slot = Arc::new(std::sync::Mutex::new(None));
         let callback_slot = effective_slot.clone();
         let callback_config = config.clone();
-        let callback = move |request: &Request, response: Response| {
-            match websocket_signal::inspect_upgrade(
+        let callback =
+            move |request: &Request, response: Response| match websocket_signal::inspect_upgrade(
                 request.uri(),
                 request.headers(),
                 route_addr,
@@ -2783,8 +2889,7 @@ impl RendezvousServer {
                         .body(Some("Forbidden".to_owned()))
                         .expect("static WebSocket rejection response"))
                 }
-            }
-        };
+            };
         // Same transport bounds as upstream 1.1.17's /ws listener (#722,
         // #747): MAX_MESSAGE_KB caps the frame, 8 KiB socket buffers, and the
         // upgrade handshake must finish within 30 seconds.
@@ -2796,11 +2901,7 @@ impl RendezvousServer {
             .max_frame_size(Some(max_frame_bytes.min(WS_DEFAULT_MAX_FRAME_SIZE)));
         let websocket = timeout(
             30_000,
-            tokio_tungstenite::accept_hdr_async_with_config(
-                stream,
-                callback,
-                Some(parser_config),
-            ),
+            tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(parser_config)),
         )
         .await??;
         let effective_addr = effective_slot
@@ -2861,8 +2962,8 @@ impl RendezvousServer {
     ) -> Option<websocket_signal::SessionToken> {
         let registration_started = Instant::now();
         loop {
-            let elapsed_ms = u64::try_from(registration_started.elapsed().as_millis())
-                .unwrap_or(u64::MAX);
+            let elapsed_ms =
+                u64::try_from(registration_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let remaining_ms = config.registration_timeout_ms.saturating_sub(elapsed_ms);
             if remaining_ms == 0 {
                 log::debug!("WebSocket Signal absolute registration deadline elapsed");
@@ -2898,7 +2999,10 @@ impl RendezvousServer {
                 continue;
             }
             if bytes.len() > config.max_frame_bytes {
-                log::warn!("Rejected oversized WebSocket Signal frame: {} bytes", bytes.len());
+                log::warn!(
+                    "Rejected oversized WebSocket Signal frame: {} bytes",
+                    bytes.len()
+                );
                 return None;
             }
             let parsed = match RendezvousMessage::parse_from_bytes(&bytes) {
@@ -2953,12 +3057,8 @@ impl RendezvousServer {
                         }
                         return None;
                     }
-                    if !websocket_signal::capacity_available(
-                        &rk.id,
-                        effective_addr.ip(),
-                        config,
-                    )
-                    .await
+                    if !websocket_signal::capacity_available(&rk.id, effective_addr.ip(), config)
+                        .await
                     {
                         let mut response = RendezvousMessage::new();
                         response.set_register_pk_response(RegisterPkResponse {
@@ -3001,8 +3101,7 @@ impl RendezvousServer {
                                     if tracked {
                                         route_generation = generation;
                                     }
-                                    self.activate_websocket_route(&outcome.id, generation)
-                                        .await;
+                                    self.activate_websocket_route(&outcome.id, generation).await;
                                     claim
                                         .commit(profile_activation::RouteKind::WebSocket {
                                             generation,
@@ -3018,8 +3117,8 @@ impl RendezvousServer {
                             }
                         }
                     }
-                    let keep_alive = (config.idle_timeout_ms / 1_500)
-                        .clamp(1, i32::MAX as u64) as i32;
+                    let keep_alive =
+                        (config.idle_timeout_ms / 1_500).clamp(1, i32::MAX as u64) as i32;
                     let mut response = RendezvousMessage::new();
                     response.set_register_pk_response(RegisterPkResponse {
                         result: outcome.result.into(),
@@ -3043,11 +3142,8 @@ impl RendezvousServer {
                             )
                             .await
                             {
-                                self.expire_websocket_route(
-                                    &token.peer_id,
-                                    token.generation,
-                                )
-                                .await;
+                                self.expire_websocket_route(&token.peer_id, token.generation)
+                                    .await;
                             }
                         }
                         return None;
@@ -3073,16 +3169,17 @@ impl RendezvousServer {
                 }
                 Some(_) => {
                     let mut sink = Some(Sink::Ws(writer.clone()));
-                    let mut keep_reading = self.handle_tcp(
-                        &bytes,
-                        &mut sink,
-                        route_addr,
-                        effective_addr,
-                        key,
-                        true,
-                        connection_auth::SignalTransport::WebSocket,
-                    )
-                    .await;
+                    let mut keep_reading = self
+                        .handle_tcp(
+                            &bytes,
+                            &mut sink,
+                            route_addr,
+                            effective_addr,
+                            key,
+                            true,
+                            connection_auth::SignalTransport::WebSocket,
+                        )
+                        .await;
                     while keep_reading {
                         match timeout(config.idle_timeout_ms, stream.next()).await {
                             Ok(Some(Ok(tungstenite::Message::Binary(bytes)))) => {
@@ -3110,9 +3207,9 @@ impl RendezvousServer {
                                     break;
                                 }
                             }
-                            Ok(Some(Ok(tungstenite::Message::Close(_))))
-                            | Ok(None)
-                            | Err(_) => break,
+                            Ok(Some(Ok(tungstenite::Message::Close(_)))) | Ok(None) | Err(_) => {
+                                break
+                            }
                             Ok(Some(Ok(_))) | Ok(Some(Err(_))) => break,
                         }
                     }
@@ -3255,7 +3352,9 @@ impl RendezvousServer {
         if ws {
             let ws_config = websocket_signal::config();
             if ws_config.enabled {
-                return self.handle_websocket_signal(stream, addr, key, ws_config).await;
+                return self
+                    .handle_websocket_signal(stream, addr, key, ws_config)
+                    .await;
             }
             log::debug!("WebSocket Signal listener is disabled; closing admission");
             return Ok(());
@@ -3266,12 +3365,8 @@ impl RendezvousServer {
             // Never accept larger frames than upstream MAX_MESSAGE_KB allows
             // (rustdesk-server#747), whatever secure_tcp.max_frame_bytes says.
             secure_config.max_frame_bytes = secure_config.max_frame_bytes.min(*MAX_MESSAGE);
-            let negotiated = secure_tcp::negotiate(
-                stream,
-                self.inner.sk.as_ref(),
-                &secure_config,
-            )
-            .await?;
+            let negotiated =
+                secure_tcp::negotiate(stream, self.inner.sk.as_ref(), &secure_config).await?;
             let secure_tcp::NegotiatedTcp {
                 sink: tcp_sink,
                 stream: mut tcp_stream,
@@ -3289,12 +3384,16 @@ impl RendezvousServer {
             sink = Some(Sink::TcpStream(tcp_sink));
             let mut keep_reading = true;
             if let Some(bytes) = first_plaintext {
-                keep_reading = self.handle_tcp(&bytes, &mut sink, addr, addr, key, ws, signal_transport).await;
+                keep_reading = self
+                    .handle_tcp(&bytes, &mut sink, addr, addr, key, ws, signal_transport)
+                    .await;
             }
             while keep_reading {
                 match timeout(secure_config.idle_timeout_ms, tcp_stream.next()).await {
                     Ok(Some(Ok(bytes))) => {
-                        keep_reading = self.handle_tcp(&bytes, &mut sink, addr, addr, key, ws, signal_transport).await;
+                        keep_reading = self
+                            .handle_tcp(&bytes, &mut sink, addr, addr, key, ws, signal_transport)
+                            .await;
                     }
                     _ => break,
                 }
@@ -3592,11 +3691,13 @@ mod tests {
         if max > 0 {
             // the oldest half is evicted and the newest kept
             assert_eq!(lock.front().unwrap().to_id, format!("peer{}", max % 31));
-            assert_eq!(lock.back().unwrap().to_id, format!("peer{}", (max * 2 - 1) % 31));
+            assert_eq!(
+                lock.back().unwrap().to_id,
+                format!("peer{}", (max * 2 - 1) % 31)
+            );
         }
     }
 }
-
 
 #[cfg(test)]
 mod starry_allocation_tests {
@@ -3619,5 +3720,104 @@ mod starry_allocation_tests {
         assert_eq!(trace.selection.kind, "rotation_prediction");
         assert_eq!(ROTATION_RELAY_SERVER.load(Ordering::SeqCst), 23);
         ROTATION_RELAY_SERVER.store(original, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod relay_spreading_tests {
+    use super::*;
+
+    fn candidates() -> Vec<String> {
+        vec![
+            "relay-a:21117".to_owned(),
+            "relay-b:21117".to_owned(),
+            "relay-c:21117".to_owned(),
+        ]
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("a valid address")
+    }
+
+    /// The whole point: several relays in one rule should all see traffic.
+    ///
+    /// Before this, every client of a rule took the first entry, so a country
+    /// with three relays used one and kept two idle. A hash that never reached
+    /// the later candidates would pass a single-client test, which is why this
+    /// asserts the distribution over a range.
+    #[test]
+    fn clients_are_spread_across_every_candidate() {
+        let list = candidates();
+        let mut seen = std::collections::HashSet::new();
+        for host in 1..=60u8 {
+            let client = ip(&format!("203.0.113.{host}"));
+            seen.insert(pick_within(list.clone(), client));
+        }
+        assert_eq!(
+            seen.len(),
+            list.len(),
+            "every candidate must receive traffic, got {seen:?}"
+        );
+    }
+
+    /// One client must not move between relays, or telemetry looks like flapping
+    /// and any per-relay state is lost on every reconnect.
+    #[test]
+    fn the_choice_is_stable_for_a_client() {
+        let client = ip("198.51.100.7");
+        let first = pick_within(candidates(), client);
+        for _ in 0..20 {
+            assert_eq!(pick_within(candidates(), client), first);
+        }
+    }
+
+    /// A single candidate is returned unchanged rather than hashed to nothing.
+    #[test]
+    fn a_single_candidate_is_returned() {
+        let one = vec!["only:21117".to_owned()];
+        assert_eq!(pick_within(one.clone(), ip("198.51.100.7")), "only:21117");
+        assert_eq!(pick_within(Vec::new(), ip("198.51.100.7")), "");
+    }
+
+    /// The escape hatch restores the previous behaviour, because a deployment
+    /// whose clients share one NAT would otherwise pin a whole site to one relay.
+    ///
+    /// Passed as an argument rather than through the environment: a test that
+    /// sets a process-wide variable races every other test in this binary.
+    #[test]
+    fn pin_to_first_restores_the_old_behaviour() {
+        let list = candidates();
+        for host in 1..=20u8 {
+            let client = ip(&format!("203.0.113.{host}"));
+            assert_eq!(
+                pick_within_pinned(list.clone(), client, true),
+                "relay-a:21117"
+            );
+            // And with the flag off, the spread is live again.
+            assert!(
+                list.contains(&pick_within_pinned(list.clone(), client, false)),
+                "the unpinned choice must be one of the candidates"
+            );
+        }
+    }
+
+    /// IPv4 hashes all four bytes; IPv6 hashes the /64 prefix only, because the
+    /// interface identifier changes per connection.
+    #[test]
+    fn the_hash_uses_the_address_not_the_ephemeral_part() {
+        assert_ne!(
+            client_hash(ip("203.0.113.1")),
+            client_hash(ip("203.0.113.2"))
+        );
+        assert_eq!(
+            client_hash(ip("2001:db8:1:2:aaaa::1")),
+            client_hash(ip("2001:db8:1:2:bbbb::2")),
+            "an IPv6 interface identifier must not change the choice"
+        );
+        assert_ne!(
+            client_hash(ip("2001:db8:1:2::1")),
+            client_hash(ip("2001:db8:1:3::1")),
+            "a different /64 must land differently"
+        );
     }
 }
